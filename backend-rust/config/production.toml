@@ -1,0 +1,13 @@
+[app]
+env = "production"
+host = "0.0.0.0"
+port = 8088
+
+[database]
+max_connections = 20
+acquire_timeout_secs = 10
+
+[storage]
+upload_dir = "/data/justiceai/uploads"
+report_dir = "/data/justiceai/reports"
+training_dir = "/data/justiceai/training"

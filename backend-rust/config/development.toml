@@ -1,0 +1,22 @@
+[app]
+env = "development"
+host = "127.0.0.1"
+port = 8088
+
+[database]
+url = "postgres://justiceai:justiceai@127.0.0.1:5432/justiceai"
+
+[hugegraph]
+base_url = "http://127.0.0.1:8080"
+gremlin_url = "ws://127.0.0.1:8182/gremlin"
+
+[milvus]
+address = "http://127.0.0.1:19530"
+
+[vllm]
+base_url = "http://127.0.0.1:8000/v1"
+
+[storage]
+upload_dir = "./runtime/uploads"
+report_dir = "./runtime/reports"
+training_dir = "./runtime/training"

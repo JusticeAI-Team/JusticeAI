@@ -1,0 +1,28 @@
+[app]
+name = "JusticeAI Backend"
+env = "development"
+host = "0.0.0.0"
+port = 8088
+
+[database]
+url = "postgres://justiceai:justiceai@postgres:5432/justiceai"
+max_connections = 10
+acquire_timeout_secs = 5
+
+[hugegraph]
+base_url = "http://hugegraph:8080"
+gremlin_url = "ws://hugegraph:8182/gremlin"
+username = "admin"
+password = "admin"
+
+[milvus]
+address = "http://milvus:19530"
+
+[vllm]
+base_url = "http://vllm:8000/v1"
+model_name = "Qwen2.5-32B-Instruct-AWQ"
+
+[storage]
+upload_dir = "./runtime/uploads"
+report_dir = "./runtime/reports"
+training_dir = "./runtime/training"
