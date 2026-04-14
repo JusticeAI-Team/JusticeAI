@@ -5,7 +5,9 @@ use axum::{
     routing::post,
     Router,
 };
-use chrono::{Datelike, Utc};
+use chrono::{DateTime, Datelike, Utc};
+use serde::Serialize;
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -33,14 +35,53 @@ struct StorageTarget {
     absolute_path: PathBuf,
 }
 
+#[derive(Debug, Serialize)]
+struct UploadResponse {
+    import_id: Uuid,
+    status: &'static str,
+    file: UploadedFileInfo,
+}
+
+#[derive(Debug, Serialize)]
+struct UploadedFileInfo {
+    id: Uuid,
+    original_filename: String,
+    stored_filename: String,
+    stored_path: String,
+    file_size: i64,
+    mime_type: Option<String>,
+}
+
 async fn upload(
     State(state): State<AppState>,
     multipart: Multipart,
-) -> Result<axum::Json<ApiResponse<String>>, AppError> {
+) -> Result<axum::Json<ApiResponse<UploadResponse>>, AppError> {
     let payload = read_upload_field(multipart).await?;
     let storage = build_storage_target(state.settings().storage.upload_dir.as_str(), &payload.extension);
+    let now = Utc::now();
+    let import_id = Uuid::new_v4();
+    let file_id = Uuid::new_v4();
+
+    let mut tx = state.db().begin().await.map_err(|_| AppError::Internal)?;
+
+    insert_import_record(&mut tx, import_id, now).await?;
     write_upload_file(&storage, &payload.bytes)?;
-    Ok(ok(storage.relative_path))
+    insert_import_file_record(&mut tx, file_id, import_id, &payload, &storage, now).await?;
+
+    tx.commit().await.map_err(|_| AppError::Internal)?;
+
+    Ok(ok(UploadResponse {
+        import_id,
+        status: "uploaded",
+        file: UploadedFileInfo {
+            id: file_id,
+            original_filename: payload.original_filename,
+            stored_filename: storage.stored_filename,
+            stored_path: storage.relative_path,
+            file_size: payload.bytes.len() as i64,
+            mime_type: payload.mime_type,
+        },
+    }))
 }
 
 fn allowed_extension(ext: &str) -> bool {
@@ -129,4 +170,59 @@ async fn read_upload_field(mut multipart: Multipart) -> Result<UploadFilePayload
     }
 
     Err(AppError::Validation("必须提供 file 文件字段".to_string()))
+}
+
+async fn insert_import_record(
+    tx: &mut Transaction<'_, Postgres>,
+    import_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO imports (id, source_type, status, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(import_id)
+    .bind("manual_upload")
+    .bind("uploaded")
+    .bind(now)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(())
+}
+
+async fn insert_import_file_record(
+    tx: &mut Transaction<'_, Postgres>,
+    file_id: Uuid,
+    import_id: Uuid,
+    payload: &UploadFilePayload,
+    storage: &StorageTarget,
+    now: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO import_files (
+            id, import_id, original_filename, stored_filename, stored_path,
+            file_size, mime_type, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(file_id)
+    .bind(import_id)
+    .bind(&payload.original_filename)
+    .bind(&storage.stored_filename)
+    .bind(&storage.relative_path)
+    .bind(payload.bytes.len() as i64)
+    .bind(&payload.mime_type)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(())
 }
