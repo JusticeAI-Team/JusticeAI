@@ -46,7 +46,16 @@ struct ImportDetailResponse {
     files: Vec<ImportFileItem>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, FromRow)]
+struct ImportDetailRow {
+    id: Uuid,
+    source_type: String,
+    status: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
 struct ImportFileItem {
     id: Uuid,
     original_filename: String,
@@ -78,10 +87,49 @@ async fn query_import_list(db: &sqlx::PgPool) -> Result<Vec<ImportListItem>, App
     .map_err(|_| AppError::Internal)
 }
 
-
 async fn get_import_detail(
-    State(_state): State<AppState>,
-    Path(_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
 ) -> Result<axum::Json<ApiResponse<ImportDetailResponse>>, AppError> {
-    Err(AppError::NotFound)
+    let import = query_import_detail(state.db(), id).await?;
+    let files = query_import_files(state.db(), id).await?;
+
+    Ok(ok(ImportDetailResponse {
+        id: import.id,
+        source_type: import.source_type,
+        status: import.status,
+        created_at: import.created_at,
+        updated_at: import.updated_at,
+        files,
+    }))
+}
+
+async fn query_import_detail(db: &sqlx::PgPool, import_id: Uuid) -> Result<ImportDetailRow, AppError> {
+    sqlx::query_as::<_, ImportDetailRow>(
+        r#"
+        SELECT id, source_type, status, created_at, updated_at
+        FROM imports
+        WHERE id = $1
+        "#,
+    )
+    .bind(import_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or(AppError::NotFound)
+}
+
+async fn query_import_files(db: &sqlx::PgPool, import_id: Uuid) -> Result<Vec<ImportFileItem>, AppError> {
+    sqlx::query_as::<_, ImportFileItem>(
+        r#"
+        SELECT id, original_filename, stored_filename, stored_path, file_size, mime_type, created_at
+        FROM import_files
+        WHERE import_id = $1
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(import_id)
+    .fetch_all(db)
+    .await
+    .map_err(|_| AppError::Internal)
 }
