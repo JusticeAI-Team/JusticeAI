@@ -1,5 +1,6 @@
 pub mod health;
 pub mod import;
+pub mod import_query;
 pub mod system;
 
 use axum::Router;
@@ -10,5 +11,6 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .merge(health::routes())
         .merge(import::routes())
+        .merge(import_query::routes())
         .merge(system::routes())
 }
