@@ -5,6 +5,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::{
@@ -26,7 +27,7 @@ struct ImportListResponse {
     items: Vec<ImportListItem>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, FromRow)]
 struct ImportListItem {
     id: Uuid,
     source_type: String,
@@ -57,10 +58,26 @@ struct ImportFileItem {
 }
 
 async fn list_imports(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Result<axum::Json<ApiResponse<ImportListResponse>>, AppError> {
-    Ok(ok(ImportListResponse { items: Vec::new() }))
+    let items = query_import_list(state.db()).await?;
+
+    Ok(ok(ImportListResponse { items }))
 }
+
+async fn query_import_list(db: &sqlx::PgPool) -> Result<Vec<ImportListItem>, AppError> {
+    sqlx::query_as::<_, ImportListItem>(
+        r#"
+        SELECT id, source_type, status, created_at, updated_at
+        FROM imports
+        ORDER BY created_at DESC
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|_| AppError::Internal)
+}
+
 
 async fn get_import_detail(
     State(_state): State<AppState>,
