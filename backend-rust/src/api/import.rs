@@ -36,10 +36,11 @@ struct StorageTarget {
 async fn upload(
     State(state): State<AppState>,
     multipart: Multipart,
-) -> Result<axum::Json<ApiResponse<&'static str>>, AppError> {
+) -> Result<axum::Json<ApiResponse<String>>, AppError> {
     let payload = read_upload_field(multipart).await?;
-    let _storage = build_storage_target(state.settings().storage.upload_dir.as_str(), &payload.extension);
-    Ok(ok("validated"))
+    let storage = build_storage_target(state.settings().storage.upload_dir.as_str(), &payload.extension);
+    write_upload_file(&storage, &payload.bytes)?;
+    Ok(ok(storage.relative_path))
 }
 
 fn allowed_extension(ext: &str) -> bool {
@@ -71,6 +72,15 @@ fn build_storage_target(upload_dir: &str, extension: &str) -> StorageTarget {
         relative_path,
         absolute_path,
     }
+}
+
+fn write_upload_file(target: &StorageTarget, bytes: &[u8]) -> Result<(), AppError> {
+    if let Some(parent) = target.absolute_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| AppError::Internal)?;
+    }
+
+    std::fs::write(&target.absolute_path, bytes).map_err(|_| AppError::Internal)?;
+    Ok(())
 }
 
 async fn read_upload_field(mut multipart: Multipart) -> Result<UploadFilePayload, AppError> {
