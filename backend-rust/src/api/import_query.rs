@@ -113,8 +113,17 @@ async fn list_imports(
     Query(query): Query<ImportListQuery>,
 ) -> Result<axum::Json<ApiResponse<ImportListResponse>>, AppError> {
     let query = normalize_import_list_query(query);
-    let items = query_import_list(state.db(), &query).await?;
-    let total = query_import_total(state.db()).await?;
+
+    let (items, total) = match query.status.as_deref() {
+        Some(status) => (
+            query_import_list_by_status(state.db(), &query, status).await?,
+            query_import_total_by_status(state.db(), status).await?,
+        ),
+        None => (
+            query_import_list(state.db(), &query).await?,
+            query_import_total(state.db()).await?,
+        ),
+    };
 
     Ok(ok(ImportListResponse {
         items,
@@ -136,13 +145,24 @@ async fn query_import_total(db: &sqlx::PgPool) -> Result<i64, AppError> {
     .map_err(|_| AppError::Internal)
 }
 
+async fn query_import_total_by_status(db: &sqlx::PgPool, status: &str) -> Result<i64, AppError> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM imports
+        WHERE status = $1
+        "#,
+    )
+    .bind(status)
+    .fetch_one(db)
+    .await
+    .map_err(|_| AppError::Internal)
+}
+
 async fn query_import_list(
     db: &sqlx::PgPool,
     query: &NormalizedImportListQuery,
 ) -> Result<Vec<ImportListItem>, AppError> {
-    let _status = query.status.as_deref();
-    // status SQL 过滤留给后续任务实现，本轮仅实现无筛选分页。
-
     sqlx::query_as::<_, ImportListItem>(
         r#"
         SELECT id, source_type, status, created_at, updated_at
@@ -151,6 +171,28 @@ async fn query_import_list(
         LIMIT $1 OFFSET $2
         "#,
     )
+    .bind(query.page_size)
+    .bind(query.offset)
+    .fetch_all(db)
+    .await
+    .map_err(|_| AppError::Internal)
+}
+
+async fn query_import_list_by_status(
+    db: &sqlx::PgPool,
+    query: &NormalizedImportListQuery,
+    status: &str,
+) -> Result<Vec<ImportListItem>, AppError> {
+    sqlx::query_as::<_, ImportListItem>(
+        r#"
+        SELECT id, source_type, status, created_at, updated_at
+        FROM imports
+        WHERE status = $1
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3
+        "#,
+    )
+    .bind(status)
     .bind(query.page_size)
     .bind(query.offset)
     .fetch_all(db)
