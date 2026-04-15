@@ -94,7 +94,7 @@ fn normalize_import_list_query(query: ImportListQuery) -> NormalizedImportListQu
         raw_page_size.min(100)
     };
 
-    let offset = (page - 1) * page_size;
+    let offset = page.saturating_sub(1).saturating_mul(page_size);
     let status = query
         .status
         .map(|value| value.trim().to_string())
@@ -125,8 +125,12 @@ async fn list_imports(
 
 async fn query_import_list(
     db: &sqlx::PgPool,
-    _query: &NormalizedImportListQuery,
+    query: &NormalizedImportListQuery,
 ) -> Result<Vec<ImportListItem>, AppError> {
+    let _offset = query.offset;
+    let _status = query.status.as_deref();
+    // Task 1 仅完成参数归一化骨架，分页下推与 status SQL 过滤留给后续任务实现。
+
     sqlx::query_as::<_, ImportListItem>(
         r#"
         SELECT id, source_type, status, created_at, updated_at
