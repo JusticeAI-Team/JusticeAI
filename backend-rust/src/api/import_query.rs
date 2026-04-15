@@ -246,3 +246,24 @@ async fn query_import_files(db: &sqlx::PgPool, import_id: Uuid) -> Result<Vec<Im
     .await
     .map_err(|_| AppError::Internal)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_import_list_query_uses_defaults() {
+        let query = ImportListQuery {
+            page: None,
+            page_size: None,
+            status: None,
+        };
+
+        let normalized = normalize_import_list_query(query);
+
+        assert_eq!(normalized.page, 1);
+        assert_eq!(normalized.page_size, 20);
+        assert_eq!(normalized.offset, 0);
+        assert_eq!(normalized.status, None);
+    }
+}
