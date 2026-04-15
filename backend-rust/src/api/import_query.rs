@@ -266,4 +266,95 @@ mod tests {
         assert_eq!(normalized.offset, 0);
         assert_eq!(normalized.status, None);
     }
+
+    #[test]
+    fn normalize_import_list_query_clamps_page_zero_to_one() {
+        let query = ImportListQuery {
+            page: Some(0),
+            page_size: None,
+            status: None,
+        };
+
+        let normalized = normalize_import_list_query(query);
+
+        assert_eq!(normalized.page, 1);
+    }
+
+    #[test]
+    fn normalize_import_list_query_resets_page_size_zero_to_default() {
+        let query = ImportListQuery {
+            page: None,
+            page_size: Some(0),
+            status: None,
+        };
+
+        let normalized = normalize_import_list_query(query);
+
+        assert_eq!(normalized.page_size, 20);
+    }
+
+    #[test]
+    fn normalize_import_list_query_caps_page_size_at_hundred() {
+        let query = ImportListQuery {
+            page: None,
+            page_size: Some(101),
+            status: None,
+        };
+
+        let normalized = normalize_import_list_query(query);
+
+        assert_eq!(normalized.page_size, 100);
+    }
+
+    #[test]
+    fn normalize_import_list_query_keeps_non_empty_status() {
+        let query = ImportListQuery {
+            page: None,
+            page_size: None,
+            status: Some("uploaded".to_string()),
+        };
+
+        let normalized = normalize_import_list_query(query);
+
+        assert_eq!(normalized.status, Some("uploaded".to_string()));
+    }
+
+    #[test]
+    fn normalize_import_list_query_drops_empty_status() {
+        let query = ImportListQuery {
+            page: None,
+            page_size: None,
+            status: Some(String::new()),
+        };
+
+        let normalized = normalize_import_list_query(query);
+
+        assert_eq!(normalized.status, None);
+    }
+
+    #[test]
+    fn normalize_import_list_query_drops_blank_status() {
+        let query = ImportListQuery {
+            page: None,
+            page_size: None,
+            status: Some("   \t\n  ".to_string()),
+        };
+
+        let normalized = normalize_import_list_query(query);
+
+        assert_eq!(normalized.status, None);
+    }
+
+    #[test]
+    fn normalize_import_list_query_calculates_offset_from_page_and_page_size() {
+        let query = ImportListQuery {
+            page: Some(3),
+            page_size: Some(20),
+            status: None,
+        };
+
+        let normalized = normalize_import_list_query(query);
+
+        assert_eq!(normalized.offset, 40);
+    }
 }
