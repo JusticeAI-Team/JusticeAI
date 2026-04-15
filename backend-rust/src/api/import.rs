@@ -66,9 +66,19 @@ async fn upload(
 
     insert_import_record(&mut tx, import_id, now).await?;
     write_upload_file(&storage, &payload.bytes)?;
-    insert_import_file_record(&mut tx, file_id, import_id, &payload, &storage, now).await?;
 
-    tx.commit().await.map_err(|_| AppError::Internal)?;
+    if insert_import_file_record(&mut tx, file_id, import_id, &payload, &storage, now)
+        .await
+        .is_err()
+    {
+        cleanup_uploaded_file(&storage);
+        return Err(AppError::Internal);
+    }
+
+    if tx.commit().await.is_err() {
+        cleanup_uploaded_file(&storage);
+        return Err(AppError::Internal);
+    }
 
     Ok(ok(UploadResponse {
         import_id,
@@ -122,6 +132,14 @@ fn write_upload_file(target: &StorageTarget, bytes: &[u8]) -> Result<(), AppErro
 
     std::fs::write(&target.absolute_path, bytes).map_err(|_| AppError::Internal)?;
     Ok(())
+}
+
+fn cleanup_uploaded_file(target: &StorageTarget) {
+    match std::fs::remove_file(&target.absolute_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {}
+    }
 }
 
 async fn read_upload_field(mut multipart: Multipart) -> Result<UploadFilePayload, AppError> {
