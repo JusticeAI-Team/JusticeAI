@@ -138,7 +138,13 @@ fn cleanup_uploaded_file(target: &StorageTarget) {
     match std::fs::remove_file(&target.absolute_path) {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => {}
+        Err(err) => {
+            tracing::warn!(
+                path = %target.absolute_path.display(),
+                error = %err,
+                "上传失败后的补偿删除未成功"
+            );
+        }
     }
 }
 
