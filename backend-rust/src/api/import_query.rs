@@ -24,22 +24,25 @@ pub fn routes() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 struct ImportListQuery {
-    page: Option<u32>,
-    page_size: Option<u32>,
+    page: Option<i64>,
+    page_size: Option<i64>,
+    status: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct NormalizedImportListQuery {
-    page: u32,
-    page_size: u32,
+    page: i64,
+    page_size: i64,
+    offset: i64,
+    status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct ImportListResponse {
     items: Vec<ImportListItem>,
-    page: u32,
-    page_size: u32,
-    total: u64,
+    page: i64,
+    page_size: i64,
+    total: i64,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -82,9 +85,26 @@ struct ImportFileItem {
 }
 
 fn normalize_import_list_query(query: ImportListQuery) -> NormalizedImportListQuery {
+    let page = query.page.unwrap_or(1).max(1);
+
+    let raw_page_size = query.page_size.unwrap_or(20);
+    let page_size = if raw_page_size < 1 {
+        20
+    } else {
+        raw_page_size.min(100)
+    };
+
+    let offset = (page - 1) * page_size;
+    let status = query
+        .status
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
     NormalizedImportListQuery {
-        page: query.page.unwrap_or(1).max(1),
-        page_size: query.page_size.unwrap_or(20).max(1),
+        page,
+        page_size,
+        offset,
+        status,
     }
 }
 
