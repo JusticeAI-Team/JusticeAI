@@ -1,10 +1,10 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::get,
     Router,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
@@ -22,9 +22,24 @@ pub fn routes() -> Router<AppState> {
         .route("/imports/:id", get(get_import_detail))
 }
 
+#[derive(Debug, Deserialize)]
+struct ImportListQuery {
+    page: Option<u32>,
+    page_size: Option<u32>,
+}
+
+#[derive(Debug)]
+struct NormalizedImportListQuery {
+    page: u32,
+    page_size: u32,
+}
+
 #[derive(Debug, Serialize)]
 struct ImportListResponse {
     items: Vec<ImportListItem>,
+    page: u32,
+    page_size: u32,
+    total: u64,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -66,15 +81,32 @@ struct ImportFileItem {
     created_at: DateTime<Utc>,
 }
 
-async fn list_imports(
-    State(state): State<AppState>,
-) -> Result<axum::Json<ApiResponse<ImportListResponse>>, AppError> {
-    let items = query_import_list(state.db()).await?;
-
-    Ok(ok(ImportListResponse { items }))
+fn normalize_import_list_query(query: ImportListQuery) -> NormalizedImportListQuery {
+    NormalizedImportListQuery {
+        page: query.page.unwrap_or(1).max(1),
+        page_size: query.page_size.unwrap_or(20).max(1),
+    }
 }
 
-async fn query_import_list(db: &sqlx::PgPool) -> Result<Vec<ImportListItem>, AppError> {
+async fn list_imports(
+    State(state): State<AppState>,
+    Query(query): Query<ImportListQuery>,
+) -> Result<axum::Json<ApiResponse<ImportListResponse>>, AppError> {
+    let query = normalize_import_list_query(query);
+    let items = query_import_list(state.db(), &query).await?;
+
+    Ok(ok(ImportListResponse {
+        items,
+        page: query.page,
+        page_size: query.page_size,
+        total: 0,
+    }))
+}
+
+async fn query_import_list(
+    db: &sqlx::PgPool,
+    _query: &NormalizedImportListQuery,
+) -> Result<Vec<ImportListItem>, AppError> {
     sqlx::query_as::<_, ImportListItem>(
         r#"
         SELECT id, source_type, status, created_at, updated_at
