@@ -114,30 +114,45 @@ async fn list_imports(
 ) -> Result<axum::Json<ApiResponse<ImportListResponse>>, AppError> {
     let query = normalize_import_list_query(query);
     let items = query_import_list(state.db(), &query).await?;
+    let total = query_import_total(state.db()).await?;
 
     Ok(ok(ImportListResponse {
         items,
         page: query.page,
         page_size: query.page_size,
-        total: 0,
+        total,
     }))
+}
+
+async fn query_import_total(db: &sqlx::PgPool) -> Result<i64, AppError> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM imports
+        "#,
+    )
+    .fetch_one(db)
+    .await
+    .map_err(|_| AppError::Internal)
 }
 
 async fn query_import_list(
     db: &sqlx::PgPool,
     query: &NormalizedImportListQuery,
 ) -> Result<Vec<ImportListItem>, AppError> {
-    let _offset = query.offset;
     let _status = query.status.as_deref();
-    // Task 1 仅完成参数归一化骨架，分页下推与 status SQL 过滤留给后续任务实现。
+    // status SQL 过滤留给后续任务实现，本轮仅实现无筛选分页。
 
     sqlx::query_as::<_, ImportListItem>(
         r#"
         SELECT id, source_type, status, created_at, updated_at
         FROM imports
         ORDER BY created_at DESC
+        LIMIT $1 OFFSET $2
         "#,
     )
+    .bind(query.page_size)
+    .bind(query.offset)
     .fetch_all(db)
     .await
     .map_err(|_| AppError::Internal)
