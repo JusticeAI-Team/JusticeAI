@@ -1,5 +1,11 @@
 import { requestJson } from './client'
 
+export interface ImportListParams {
+  page?: number
+  pageSize?: number
+  status?: string
+}
+
 export interface ImportListItem {
   id: string
   source_type: string
@@ -15,8 +21,17 @@ export interface ImportListResponse {
   total: number
 }
 
-export async function fetchImportList() {
-  return requestJson<ImportListResponse>('/api/imports?page=1&page_size=20')
+export async function fetchImportList(params: ImportListParams = {}) {
+  const searchParams = new URLSearchParams({
+    page: String(params.page ?? 1),
+    page_size: String(params.pageSize ?? 20),
+  })
+
+  if (params.status) {
+    searchParams.set('status', params.status)
+  }
+
+  return requestJson<ImportListResponse>(`/imports?${searchParams.toString()}`)
 }
 
 export async function fetchImportDetail(importId: string) {
