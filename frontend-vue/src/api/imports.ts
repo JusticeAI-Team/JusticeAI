@@ -14,11 +14,33 @@ export interface ImportListItem {
   updated_at: string
 }
 
+export interface UploadedImportFile {
+  id: string
+  original_filename: string
+  stored_filename: string
+  stored_path: string
+  file_size: number
+  mime_type: string | null
+}
+
+export interface ImportDetailFileItem extends UploadedImportFile {
+  created_at: string
+}
+
 export interface ImportListResponse {
   items: ImportListItem[]
   page: number
   page_size: number
   total: number
+}
+
+export interface ImportDetailResponse {
+  id: string
+  source_type: string
+  status: string
+  created_at: string
+  updated_at: string
+  files: ImportDetailFileItem[]
 }
 
 export async function fetchImportList(params: ImportListParams = {}) {
@@ -35,5 +57,5 @@ export async function fetchImportList(params: ImportListParams = {}) {
 }
 
 export async function fetchImportDetail(importId: string) {
-  return requestJson(`/api/imports/${importId}`)
+  return requestJson<ImportDetailResponse>(`/imports/${importId}`)
 }
