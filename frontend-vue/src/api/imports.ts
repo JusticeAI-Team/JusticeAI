@@ -43,6 +43,12 @@ export interface ImportDetailResponse {
   files: ImportDetailFileItem[]
 }
 
+export interface UploadImportResponse {
+  import_id: string
+  status: string
+  file: UploadedImportFile
+}
+
 export async function fetchImportList(params: ImportListParams = {}) {
   const searchParams = new URLSearchParams({
     page: String(params.page ?? 1),
@@ -58,4 +64,14 @@ export async function fetchImportList(params: ImportListParams = {}) {
 
 export async function fetchImportDetail(importId: string) {
   return requestJson<ImportDetailResponse>(`/imports/${importId}`)
+}
+
+export async function uploadImportFile(file: File) {
+  const body = new FormData()
+  body.append('file', file)
+
+  return requestJson<UploadImportResponse>('/import/upload', {
+    method: 'POST',
+    body,
+  })
 }
