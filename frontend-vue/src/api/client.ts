@@ -64,5 +64,9 @@ export async function requestJson<T>(path: string, init: RequestInit = {}): Prom
     throw new Error(resolveErrorMessage(payload as ApiErrorResponse | null, response.status))
   }
 
+  if (!payload || typeof payload !== 'object' || !('success' in payload) || payload.success !== true) {
+    throw new Error(resolveErrorMessage(payload as ApiErrorResponse | null, response.status))
+  }
+
   return (payload as ApiResponse<T>).data
 }
