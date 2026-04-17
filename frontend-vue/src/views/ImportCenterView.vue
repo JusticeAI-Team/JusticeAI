@@ -47,11 +47,14 @@
         <span v-else class="hint">{{ listSummaryText }}</span>
       </div>
 
-      <p v-if="listLoading" class="hint">列表加载中...</p>
-      <p v-else-if="listError" class="error">{{ listError }}</p>
+      <p v-if="listLoading && items.length === 0" class="hint">列表加载中...</p>
+      <p v-else-if="listError && items.length === 0" class="error">{{ listError }}</p>
       <p v-else-if="items.length === 0" class="hint">{{ listEmptyMessage }}</p>
 
-      <div v-else class="table-wrapper">
+      <p v-if="listLoading && items.length > 0" class="hint">列表刷新中...</p>
+      <p v-else-if="listError && items.length > 0" class="error">{{ listError }}</p>
+
+      <div v-if="items.length > 0" class="table-wrapper">
         <table class="table">
           <thead>
             <tr>
