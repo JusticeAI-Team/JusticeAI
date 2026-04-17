@@ -372,4 +372,19 @@ mod tests {
 
         assert_eq!(normalized.offset, 40);
     }
+
+    #[test]
+    fn resolve_import_list_page_returns_first_page_when_total_is_zero() {
+        assert_eq!(resolve_import_list_page(5, 20, 0), 1);
+    }
+
+    #[test]
+    fn resolve_import_list_page_keeps_page_within_range() {
+        assert_eq!(resolve_import_list_page(2, 20, 41), 2);
+    }
+
+    #[test]
+    fn resolve_import_list_page_clamps_out_of_range_page_to_last_page() {
+        assert_eq!(resolve_import_list_page(9, 20, 41), 3);
+    }
 }
