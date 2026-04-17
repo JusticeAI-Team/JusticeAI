@@ -88,6 +88,15 @@ fn calculate_import_list_offset(page: i64, page_size: i64) -> i64 {
     page.saturating_sub(1).saturating_mul(page_size)
 }
 
+fn resolve_import_list_page(page: i64, page_size: i64, total: i64) -> i64 {
+    if total <= 0 {
+        return 1;
+    }
+
+    let total_pages = total.saturating_sub(1) / page_size + 1;
+    page.min(total_pages)
+}
+
 fn normalize_import_list_query(query: ImportListQuery) -> NormalizedImportListQuery {
     let page = query.page.unwrap_or(1).max(1);
 
