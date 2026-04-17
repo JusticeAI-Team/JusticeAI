@@ -178,7 +178,7 @@ fn cleanup_uploaded_file(target: &StorageTarget) {
 fn map_multipart_error(error: MultipartError) -> AppError {
     match error.status() {
         StatusCode::PAYLOAD_TOO_LARGE => {
-            AppError::Validation("读取上传表单失败".to_string())
+            AppError::Validation("上传文件不能超过 10 MB".to_string())
         }
         StatusCode::BAD_REQUEST => AppError::Validation("读取上传表单失败".to_string()),
         _ => AppError::Internal,
