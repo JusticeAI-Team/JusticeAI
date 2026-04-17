@@ -6,10 +6,17 @@
     <section class="panel">
       <h2>上传区</h2>
       <div class="upload-row">
-        <input type="file" accept=".csv,.xls,.xlsx" />
-        <button type="button">上传文件</button>
+        <input
+          ref="fileInput"
+          type="file"
+          accept=".csv,.xls,.xlsx"
+          @change="handleFileChange"
+        />
+        <button type="button" :disabled="!selectedFile">上传文件</button>
       </div>
+      <p v-if="selectedFile" class="hint">已选择：{{ selectedFile.name }}</p>
       <p class="hint">仅支持 csv、xls、xlsx，且文件不能超过 10 MB。</p>
+      <p v-if="uploadError" class="error">{{ uploadError }}</p>
     </section>
 
     <section class="panel">
@@ -156,6 +163,9 @@ import {
 } from '../api/imports'
 
 const pageSize = ref(20)
+const maxUploadFileBytes = 10 * 1024 * 1024
+const allowedUploadExtensions = ['csv', 'xls', 'xlsx']
+
 const items = ref<ImportListItem[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -168,6 +178,9 @@ const detail = ref<ImportDetailResponse | null>(null)
 const detailLoading = ref(false)
 const detailError = ref('')
 const detailRequestId = ref(0)
+const selectedFile = ref<File | null>(null)
+const uploadError = ref('')
+const fileInput = ref<HTMLInputElement | null>(null)
 
 const totalPages = computed(() => (total.value === 0 ? 0 : Math.ceil(total.value / pageSize.value)))
 const hasPrevPage = computed(() => page.value > 1)
@@ -207,6 +220,48 @@ function formatFileSize(value?: number) {
   }
 
   return `${(value / 1024 / 1024).toFixed(2)} MB`
+}
+
+function clearSelectedFile() {
+  selectedFile.value = null
+
+  if (fileInput.value) {
+    fileInput.value.value = ''
+  }
+}
+
+function handleFileChange(event: Event) {
+  const target = event.target as HTMLInputElement
+  const [file] = Array.from(target.files ?? [])
+
+  uploadError.value = ''
+
+  if (!file) {
+    selectedFile.value = null
+    return
+  }
+
+  const extension = file.name.split('.').pop()?.toLowerCase() ?? ''
+
+  if (!allowedUploadExtensions.includes(extension)) {
+    clearSelectedFile()
+    uploadError.value = '仅支持 xlsx、xls、csv 文件'
+    return
+  }
+
+  if (file.size === 0) {
+    clearSelectedFile()
+    uploadError.value = '上传文件不能为空'
+    return
+  }
+
+  if (file.size > maxUploadFileBytes) {
+    clearSelectedFile()
+    uploadError.value = '上传文件不能超过 10 MB'
+    return
+  }
+
+  selectedFile.value = file
 }
 
 function resetDetail() {
