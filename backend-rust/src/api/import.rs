@@ -63,8 +63,12 @@ async fn upload(
     multipart: Multipart,
 ) -> Result<axum::Json<ApiResponse<UploadResponse>>, AppError> {
     let payload = read_upload_field(multipart).await?;
-    let storage = build_storage_target(state.settings().storage.upload_dir.as_str(), &payload.extension);
     let now = Utc::now();
+    let storage = build_storage_target(
+        state.settings().storage.upload_dir.as_str(),
+        &payload.extension,
+        now,
+    );
     let import_id = Uuid::new_v4();
     let file_id = Uuid::new_v4();
 
@@ -132,8 +136,7 @@ fn sanitize_original_filename(filename: &str) -> Result<String, AppError> {
     Ok(trimmed.to_string())
 }
 
-fn build_storage_target(upload_dir: &str, extension: &str) -> StorageTarget {
-    let now = Utc::now();
+fn build_storage_target(upload_dir: &str, extension: &str, now: DateTime<Utc>) -> StorageTarget {
     let uuid = Uuid::new_v4().to_string();
     let stored_filename = format!("{}.{}", uuid, extension);
     let relative_path = format!(
