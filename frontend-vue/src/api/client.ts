@@ -58,9 +58,11 @@ export async function requestJson<T>(path: string, init: RequestInit = {}): Prom
     throw new Error(resolveNetworkErrorMessage(error))
   }
 
+  const payload = (await response.json().catch(() => null)) as ApiResponse<T> | ApiErrorResponse | null
+
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`)
+    throw new Error(resolveErrorMessage(payload as ApiErrorResponse | null, response.status))
   }
 
-  return response.json() as Promise<T>
+  return (payload as ApiResponse<T>).data
 }
