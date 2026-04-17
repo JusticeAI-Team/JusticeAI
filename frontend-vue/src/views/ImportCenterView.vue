@@ -90,28 +90,58 @@
       <p v-else-if="detailError" class="error">{{ detailError }}</p>
       <p v-else-if="!selectedImportId || !detail" class="hint">请选择导入记录。</p>
 
-      <dl v-else class="detail-grid">
-        <div>
-          <dt>导入 ID</dt>
-          <dd>{{ detail.id }}</dd>
+      <div v-else>
+        <dl class="detail-grid">
+          <div>
+            <dt>导入 ID</dt>
+            <dd>{{ detail.id }}</dd>
+          </div>
+          <div>
+            <dt>来源类型</dt>
+            <dd>{{ detail.source_type }}</dd>
+          </div>
+          <div>
+            <dt>状态</dt>
+            <dd>{{ detail.status }}</dd>
+          </div>
+          <div>
+            <dt>创建时间</dt>
+            <dd>{{ formatDateTime(detail.created_at) }}</dd>
+          </div>
+          <div>
+            <dt>更新时间</dt>
+            <dd>{{ formatDateTime(detail.updated_at) }}</dd>
+          </div>
+        </dl>
+
+        <h3>关联文件</h3>
+        <p v-if="detail.files.length === 0" class="hint">当前导入记录没有关联文件。</p>
+
+        <div v-else class="table-wrapper">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>原始文件名</th>
+                <th>存储文件名</th>
+                <th>相对存储路径</th>
+                <th>文件大小</th>
+                <th>MIME 类型</th>
+                <th>创建时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="file in detail.files" :key="file.id">
+                <td>{{ file.original_filename }}</td>
+                <td>{{ file.stored_filename }}</td>
+                <td>{{ file.stored_path }}</td>
+                <td>{{ formatFileSize(file.file_size) }}</td>
+                <td>{{ file.mime_type || '-' }}</td>
+                <td>{{ formatDateTime(file.created_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-        <div>
-          <dt>来源类型</dt>
-          <dd>{{ detail.source_type }}</dd>
-        </div>
-        <div>
-          <dt>状态</dt>
-          <dd>{{ detail.status }}</dd>
-        </div>
-        <div>
-          <dt>创建时间</dt>
-          <dd>{{ formatDateTime(detail.created_at) }}</dd>
-        </div>
-        <div>
-          <dt>更新时间</dt>
-          <dd>{{ formatDateTime(detail.updated_at) }}</dd>
-        </div>
-      </dl>
+      </div>
     </section>
   </main>
 </template>
@@ -161,6 +191,22 @@ function formatDateTime(value?: string) {
   }
 
   return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function formatFileSize(value?: number) {
+  if (value == null || Number.isNaN(value)) {
+    return '-'
+  }
+
+  if (value < 1024) {
+    return `${value} B`
+  }
+
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`
+  }
+
+  return `${(value / 1024 / 1024).toFixed(2)} MB`
 }
 
 function resetDetail() {
