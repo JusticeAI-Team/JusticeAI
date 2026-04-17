@@ -37,6 +37,18 @@ struct NormalizedImportListQuery {
     status: Option<String>,
 }
 
+const IMPORT_STATUS_UPLOADED: &str = "uploaded";
+
+fn normalize_import_status_filter(status: Option<String>) -> Result<Option<String>, AppError> {
+    let status = status.map(|value| value.trim().to_ascii_lowercase());
+
+    match status.as_deref() {
+        None | Some("") => Ok(None),
+        Some(IMPORT_STATUS_UPLOADED) => Ok(status),
+        Some(_) => Err(invalid_status_filter_error()),
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ImportListResponse {
     items: Vec<ImportListItem>,
@@ -97,7 +109,7 @@ fn resolve_import_list_page(page: i64, page_size: i64, total: i64) -> i64 {
     page.min(total_pages)
 }
 
-fn normalize_import_list_query(query: ImportListQuery) -> NormalizedImportListQuery {
+fn normalize_import_list_query(query: ImportListQuery) -> Result<NormalizedImportListQuery, AppError> {
     let page = query.page.unwrap_or(1).max(1);
 
     let raw_page_size = query.page_size.unwrap_or(20);
@@ -108,24 +120,25 @@ fn normalize_import_list_query(query: ImportListQuery) -> NormalizedImportListQu
     };
 
     let offset = calculate_import_list_offset(page, page_size);
-    let status = query
-        .status
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    let status = normalize_import_status_filter(query.status)?;
 
-    NormalizedImportListQuery {
+    Ok(NormalizedImportListQuery {
         page,
         page_size,
         offset,
         status,
-    }
+    })
+}
+
+fn invalid_status_filter_error() -> AppError {
+    AppError::Validation("仅支持 uploaded 状态筛选".to_string())
 }
 
 async fn list_imports(
     State(state): State<AppState>,
     Query(query): Query<ImportListQuery>,
 ) -> Result<axum::Json<ApiResponse<ImportListResponse>>, AppError> {
-    let mut query = normalize_import_list_query(query);
+    let mut query = normalize_import_list_query(query)?;
 
     let total = match query.status.as_deref() {
         Some(status) => query_import_total_by_status(state.db(), status).await?,
@@ -274,7 +287,7 @@ mod tests {
             status: None,
         };
 
-        let normalized = normalize_import_list_query(query);
+        let normalized = normalize_import_list_query(query).unwrap();
 
         assert_eq!(normalized.page, 1);
         assert_eq!(normalized.page_size, 20);
@@ -290,7 +303,7 @@ mod tests {
             status: None,
         };
 
-        let normalized = normalize_import_list_query(query);
+        let normalized = normalize_import_list_query(query).unwrap();
 
         assert_eq!(normalized.page, 1);
     }
@@ -303,7 +316,7 @@ mod tests {
             status: None,
         };
 
-        let normalized = normalize_import_list_query(query);
+        let normalized = normalize_import_list_query(query).unwrap();
 
         assert_eq!(normalized.page_size, 20);
     }
@@ -316,7 +329,7 @@ mod tests {
             status: None,
         };
 
-        let normalized = normalize_import_list_query(query);
+        let normalized = normalize_import_list_query(query).unwrap();
 
         assert_eq!(normalized.page_size, 100);
     }
@@ -329,9 +342,19 @@ mod tests {
             status: Some("uploaded".to_string()),
         };
 
-        let normalized = normalize_import_list_query(query);
+        let normalized = normalize_import_list_query(query).unwrap();
 
         assert_eq!(normalized.status, Some("uploaded".to_string()));
+
+        let uppercase_query = ImportListQuery {
+            page: None,
+            page_size: None,
+            status: Some("UPLOADED".to_string()),
+        };
+
+        let uppercase_normalized = normalize_import_list_query(uppercase_query).unwrap();
+
+        assert_eq!(uppercase_normalized.status, Some("uploaded".to_string()));
     }
 
     #[test]
@@ -342,9 +365,22 @@ mod tests {
             status: Some(String::new()),
         };
 
-        let normalized = normalize_import_list_query(query);
+        let normalized = normalize_import_list_query(query).unwrap();
 
         assert_eq!(normalized.status, None);
+    }
+
+    #[test]
+    fn normalize_import_list_query_rejects_unknown_status() {
+        let query = ImportListQuery {
+            page: None,
+            page_size: None,
+            status: Some("processing".to_string()),
+        };
+
+        let error = normalize_import_list_query(query).unwrap_err();
+
+        assert!(matches!(error, AppError::Validation(message) if message == "仅支持 uploaded 状态筛选"));
     }
 
     #[test]
@@ -355,7 +391,7 @@ mod tests {
             status: Some("   \t\n  ".to_string()),
         };
 
-        let normalized = normalize_import_list_query(query);
+        let normalized = normalize_import_list_query(query).unwrap();
 
         assert_eq!(normalized.status, None);
     }
@@ -368,7 +404,7 @@ mod tests {
             status: None,
         };
 
-        let normalized = normalize_import_list_query(query);
+        let normalized = normalize_import_list_query(query).unwrap();
 
         assert_eq!(normalized.offset, 40);
     }
