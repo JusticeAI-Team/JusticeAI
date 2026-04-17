@@ -28,13 +28,13 @@
       <div class="toolbar">
         <label>
           状态：
-          <select v-model="statusFilter" :disabled="listLoading" @change="handleStatusChange">
+          <select v-model="statusFilter" :disabled="uploading || listLoading" @change="handleStatusChange">
             <option value="">全部</option>
             <option value="uploaded">uploaded</option>
           </select>
         </label>
 
-        <button type="button" :disabled="listLoading" @click="refreshList">
+        <button type="button" :disabled="listLoading || uploading" @click="refreshList">
           {{ listLoading ? '刷新中...' : '刷新列表' }}
         </button>
       </div>
@@ -73,7 +73,7 @@
               <td>
                 <button
                   type="button"
-                  :disabled="detailLoading && selectedImportId === item.id"
+                  :disabled="uploading || (detailLoading && selectedImportId === item.id)"
                   @click="handleSelectImport(item.id)"
                 >
                   {{ detailLoading && selectedImportId === item.id ? '加载中...' : '查看详情' }}
@@ -85,10 +85,10 @@
       </div>
 
       <div v-if="total > 0" class="pagination">
-        <button type="button" :disabled="!hasPrevPage || listLoading" @click="handlePreviousPage">
+        <button type="button" :disabled="!hasPrevPage || listLoading || uploading" @click="handlePreviousPage">
           上一页
         </button>
-        <button type="button" :disabled="!hasNextPage || listLoading" @click="handleNextPage">
+        <button type="button" :disabled="!hasNextPage || listLoading || uploading" @click="handleNextPage">
           下一页
         </button>
       </div>
@@ -171,6 +171,8 @@ const pageSize = ref(20)
 const maxUploadFileBytes = 10 * 1024 * 1024
 const allowedUploadExtensions = ['csv', 'xls', 'xlsx']
 
+type LoadResult = 'success' | 'error' | 'stale'
+
 const items = ref<ImportListItem[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -178,6 +180,7 @@ const statusFilter = ref('')
 const appliedStatusFilter = ref('')
 const listLoading = ref(false)
 const listError = ref('')
+const listRequestId = ref(0)
 const selectedImportId = ref('')
 const detail = ref<ImportDetailResponse | null>(null)
 const detailLoading = ref(false)
@@ -287,6 +290,26 @@ async function handleUpload() {
 
     uploadSuccessMessage.value = `上传成功：${response.file.original_filename}`
     clearSelectedFile()
+
+    const listResult = await loadList({
+      page: 1,
+      status: statusFilter.value,
+      preferredImportId: response.import_id,
+      skipDetail: true,
+    })
+
+    if (listResult === 'success') {
+      if (items.value.some((item) => item.id === response.import_id)) {
+        await loadDetail(response.import_id)
+      } else {
+        uploadSuccessMessage.value = `上传成功：${response.file.original_filename}。列表尚未定位到新记录，请手动刷新重试。`
+        await loadDetail(response.import_id)
+      }
+      return
+    }
+
+    uploadSuccessMessage.value = `上传成功：${response.file.original_filename}。列表刷新失败，请手动刷新后查看最新记录。`
+    await loadDetail(response.import_id)
   } catch (error) {
     uploadError.value = error instanceof Error ? error.message : '上传失败'
   } finally {
@@ -294,15 +317,7 @@ async function handleUpload() {
   }
 }
 
-function resetDetail() {
-  detailRequestId.value += 1
-  selectedImportId.value = ''
-  detail.value = null
-  detailError.value = ''
-  detailLoading.value = false
-}
-
-async function loadDetail(importId: string) {
+async function loadDetail(importId: string): Promise<LoadResult> {
   selectedImportId.value = importId
 
   const requestId = ++detailRequestId.value
@@ -314,16 +329,18 @@ async function loadDetail(importId: string) {
     const response = await fetchImportDetail(importId)
 
     if (requestId !== detailRequestId.value) {
-      return
+      return 'stale'
     }
 
     detail.value = response
+    return 'success'
   } catch (error) {
     if (requestId !== detailRequestId.value) {
-      return
+      return 'stale'
     }
 
     detailError.value = error instanceof Error ? error.message : '详情加载失败'
+    return 'error'
   } finally {
     if (requestId === detailRequestId.value) {
       detailLoading.value = false
@@ -331,30 +348,74 @@ async function loadDetail(importId: string) {
   }
 }
 
-async function loadList(options: { page?: number; status?: string } = {}) {
+async function loadList(options: {
+  page?: number
+  status?: string
+  preferredImportId?: string
+  skipDetail?: boolean
+} = {}): Promise<LoadResult> {
+  const targetPage = options.page ?? page.value
+  const targetStatus = options.status ?? statusFilter.value
+  const requestId = ++listRequestId.value
+
   listLoading.value = true
   listError.value = ''
 
   try {
     const response = await fetchImportList({
-      page: options.page ?? page.value,
+      page: targetPage,
       pageSize: pageSize.value,
-      status: options.status || undefined,
+      status: targetStatus || undefined,
     })
+
+    pageSize.value = response.page_size
+
+    if (requestId !== listRequestId.value) {
+      return 'stale'
+    }
 
     items.value = response.items
     total.value = response.total
     page.value = response.page
-    pageSize.value = response.page_size
-    appliedStatusFilter.value = options.status ?? statusFilter.value
+    appliedStatusFilter.value = targetStatus
 
-    if (selectedImportId.value && !response.items.some((item) => item.id === selectedImportId.value)) {
-      resetDetail()
+    if (response.items.length === 0) {
+      detailRequestId.value += 1
+      selectedImportId.value = ''
+      detail.value = null
+      detailError.value = ''
+      detailLoading.value = false
+      return 'success'
     }
+
+    const preferredImportId = options.preferredImportId ?? selectedImportId.value
+    const nextSelectedImportId =
+      preferredImportId && response.items.some((item) => item.id === preferredImportId)
+        ? preferredImportId
+        : response.items[0].id
+
+    detailRequestId.value += 1
+    selectedImportId.value = nextSelectedImportId
+
+    if (options.skipDetail) {
+      detail.value = null
+      detailError.value = ''
+      detailLoading.value = false
+      return 'success'
+    }
+
+    return await loadDetail(nextSelectedImportId)
   } catch (error) {
+    if (requestId !== listRequestId.value) {
+      return 'stale'
+    }
+
     listError.value = error instanceof Error ? error.message : '列表加载失败'
+    return 'error'
   } finally {
-    listLoading.value = false
+    if (requestId === listRequestId.value) {
+      listLoading.value = false
+    }
   }
 }
 
@@ -362,18 +423,18 @@ async function refreshList() {
   await loadList({
     page: page.value,
     status: statusFilter.value,
+    preferredImportId: selectedImportId.value || undefined,
   })
 }
 
 async function handleStatusChange() {
-  const previousStatus = appliedStatusFilter.value
-  await loadList({
+  const result = await loadList({
     page: 1,
     status: statusFilter.value,
   })
 
-  if (listError.value) {
-    statusFilter.value = previousStatus
+  if (result === 'error') {
+    statusFilter.value = appliedStatusFilter.value
   }
 }
 
