@@ -10,12 +10,16 @@
           ref="fileInput"
           type="file"
           accept=".csv,.xls,.xlsx"
+          :disabled="uploading"
           @change="handleFileChange"
         />
-        <button type="button" :disabled="!selectedFile">上传文件</button>
+        <button type="button" :disabled="!selectedFile || uploading" @click="handleUpload">
+          {{ uploading ? '上传中...' : '上传文件' }}
+        </button>
       </div>
       <p v-if="selectedFile" class="hint">已选择：{{ selectedFile.name }}</p>
       <p class="hint">仅支持 csv、xls、xlsx，且文件不能超过 10 MB。</p>
+      <p v-if="uploadSuccessMessage" class="success">{{ uploadSuccessMessage }}</p>
       <p v-if="uploadError" class="error">{{ uploadError }}</p>
     </section>
 
@@ -158,6 +162,7 @@ import { computed, onMounted, ref } from 'vue'
 import {
   fetchImportDetail,
   fetchImportList,
+  uploadImportFile,
   type ImportDetailResponse,
   type ImportListItem,
 } from '../api/imports'
@@ -179,7 +184,9 @@ const detailLoading = ref(false)
 const detailError = ref('')
 const detailRequestId = ref(0)
 const selectedFile = ref<File | null>(null)
+const uploading = ref(false)
 const uploadError = ref('')
+const uploadSuccessMessage = ref('')
 const fileInput = ref<HTMLInputElement | null>(null)
 
 const totalPages = computed(() => (total.value === 0 ? 0 : Math.ceil(total.value / pageSize.value)))
@@ -235,6 +242,7 @@ function handleFileChange(event: Event) {
   const [file] = Array.from(target.files ?? [])
 
   uploadError.value = ''
+  uploadSuccessMessage.value = ''
 
   if (!file) {
     selectedFile.value = null
@@ -262,6 +270,28 @@ function handleFileChange(event: Event) {
   }
 
   selectedFile.value = file
+}
+
+async function handleUpload() {
+  const file = selectedFile.value
+  if (!file) {
+    return
+  }
+
+  uploading.value = true
+  uploadError.value = ''
+  uploadSuccessMessage.value = ''
+
+  try {
+    const response = await uploadImportFile(file)
+
+    uploadSuccessMessage.value = `上传成功：${response.file.original_filename}`
+    clearSelectedFile()
+  } catch (error) {
+    uploadError.value = error instanceof Error ? error.message : '上传失败'
+  } finally {
+    uploading.value = false
+  }
 }
 
 function resetDetail() {
