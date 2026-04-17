@@ -298,3 +298,59 @@ async fn insert_import_file_record(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn allowed_extension_accepts_supported_types() {
+        assert!(allowed_extension("csv"));
+        assert!(allowed_extension("xls"));
+        assert!(allowed_extension("xlsx"));
+        assert!(!allowed_extension("txt"));
+    }
+
+    #[test]
+    fn extract_extension_normalizes_case() {
+        assert_eq!(extract_extension("案件台账.XLSX"), Some("xlsx".to_string()));
+    }
+
+    #[test]
+    fn extract_extension_returns_none_without_suffix() {
+        assert_eq!(extract_extension("案件台账"), None);
+    }
+
+    #[test]
+    fn sanitize_original_filename_trims_whitespace() {
+        let sanitized = sanitize_original_filename("  案件台账.xlsx  ").unwrap();
+
+        assert_eq!(sanitized, "案件台账.xlsx");
+    }
+
+    #[test]
+    fn sanitize_original_filename_rejects_blank_name() {
+        let error = sanitize_original_filename("   \t\n ").unwrap_err();
+
+        assert!(matches!(error, AppError::Validation(message) if message == "上传文件名不能为空"));
+    }
+
+    #[test]
+    fn sanitize_original_filename_rejects_illegal_characters() {
+        let error = sanitize_original_filename("案件/台账.xlsx").unwrap_err();
+
+        assert!(matches!(error, AppError::Validation(message) if message == "上传文件名包含非法字符"));
+    }
+
+    #[test]
+    fn build_storage_target_uses_given_date_parts() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 17, 8, 30, 0).single().unwrap();
+
+        let target = build_storage_target("uploads", "csv", now);
+
+        assert!(target.stored_filename.ends_with(".csv"));
+        assert!(target.relative_path.starts_with("2026/04/17/"));
+        assert_eq!(target.absolute_path, PathBuf::from("uploads").join(&target.relative_path));
+    }
+}
