@@ -10,8 +10,11 @@ pub enum AppError {
     Internal,
     NotFound,
     Validation(String),
+    #[allow(dead_code)]
     DependencyUnavailable(String),
+    #[allow(dead_code)]
     Unauthorized,
+    #[allow(dead_code)]
     Forbidden,
 }
 
