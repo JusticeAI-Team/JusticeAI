@@ -160,7 +160,11 @@ fn write_upload_file(target: &StorageTarget, bytes: &[u8]) -> Result<(), AppErro
         std::fs::create_dir_all(parent).map_err(|_| AppError::Internal)?;
     }
 
-    std::fs::write(&target.absolute_path, bytes).map_err(|_| AppError::Internal)?;
+    if std::fs::write(&target.absolute_path, bytes).is_err() {
+        cleanup_uploaded_file(target);
+        return Err(AppError::Internal);
+    }
+
     Ok(())
 }
 
