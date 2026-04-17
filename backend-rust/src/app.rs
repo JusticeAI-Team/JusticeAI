@@ -53,7 +53,9 @@ pub struct DatabaseConfig {
 pub struct HugeGraphConfig {
     pub base_url: String,
     pub gremlin_url: String,
+    #[allow(dead_code)]
     pub username: String,
+    #[allow(dead_code)]
     pub password: String,
 }
 
