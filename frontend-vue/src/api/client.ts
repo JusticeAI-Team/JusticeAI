@@ -1,4 +1,4 @@
-const BASE_URL = 'http://127.0.0.1:8088'
+const BASE_URL = '/api'
 
 export async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE_URL}${path}`, {
