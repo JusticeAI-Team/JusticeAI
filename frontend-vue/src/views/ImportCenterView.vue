@@ -323,7 +323,6 @@ async function loadDetail(importId: string): Promise<LoadResult> {
   const requestId = ++detailRequestId.value
   detailLoading.value = true
   detailError.value = ''
-  detail.value = null
 
   try {
     const response = await fetchImportDetail(importId)
@@ -398,7 +397,6 @@ async function loadList(options: {
     selectedImportId.value = nextSelectedImportId
 
     if (options.skipDetail) {
-      detail.value = null
       detailError.value = ''
       detailLoading.value = false
       return 'success'
