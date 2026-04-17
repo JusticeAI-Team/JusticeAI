@@ -32,7 +32,7 @@
     <section class="panel">
       <div class="section-header">
         <h2>导入列表</h2>
-        <span v-if="total > 0" class="hint">第 {{ page }} 页 · 共 {{ total }} 条</span>
+        <span v-if="total > 0" class="hint">第 {{ page }} 页 / 共 {{ totalPages }} 页 · 共 {{ total }} 条</span>
         <span v-else class="hint">{{ listSummaryText }}</span>
       </div>
 
@@ -66,6 +66,15 @@
           </tbody>
         </table>
       </div>
+
+      <div v-if="total > 0" class="pagination">
+        <button type="button" :disabled="!hasPrevPage || listLoading" @click="handlePreviousPage">
+          上一页
+        </button>
+        <button type="button" :disabled="!hasNextPage || listLoading" @click="handleNextPage">
+          下一页
+        </button>
+      </div>
     </section>
 
     <section class="panel">
@@ -88,6 +97,9 @@ const appliedStatusFilter = ref('')
 const listLoading = ref(false)
 const listError = ref('')
 
+const totalPages = computed(() => (total.value === 0 ? 0 : Math.ceil(total.value / pageSize.value)))
+const hasPrevPage = computed(() => page.value > 1)
+const hasNextPage = computed(() => totalPages.value > 0 && page.value < totalPages.value)
 const hasAppliedStatusFilter = computed(() => appliedStatusFilter.value !== '')
 const listSummaryText = computed(() =>
   hasAppliedStatusFilter.value ? '当前筛选条件下暂无导入记录' : '暂无导入记录',
@@ -149,6 +161,28 @@ async function handleStatusChange() {
   if (listError.value) {
     statusFilter.value = previousStatus
   }
+}
+
+async function handlePreviousPage() {
+  if (!hasPrevPage.value) {
+    return
+  }
+
+  await loadList({
+    page: page.value - 1,
+    status: statusFilter.value,
+  })
+}
+
+async function handleNextPage() {
+  if (!hasNextPage.value) {
+    return
+  }
+
+  await loadList({
+    page: page.value + 1,
+    status: statusFilter.value,
+  })
 }
 
 onMounted(() => {
