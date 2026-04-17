@@ -31,14 +31,32 @@ function resolveErrorMessage(payload: ApiErrorResponse | null, status: number) {
   return message ?? `HTTP ${status}`
 }
 
-export async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE_URL}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
-    ...init,
-  })
+function resolveNetworkErrorMessage(error: unknown) {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return '请求已取消'
+  }
+
+  return '网络请求失败，请检查前端代理或后端服务'
+}
+
+export async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers ?? {})
+  const isFormData = init.body instanceof FormData
+
+  if (!isFormData && init.body != null && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+
+  let response: Response
+
+  try {
+    response = await fetch(`${BASE_URL}${path}`, {
+      ...init,
+      headers,
+    })
+  } catch (error) {
+    throw new Error(resolveNetworkErrorMessage(error))
+  }
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`)
