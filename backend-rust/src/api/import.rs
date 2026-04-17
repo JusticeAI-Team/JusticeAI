@@ -109,6 +109,27 @@ fn extract_extension(filename: &str) -> Option<String> {
         .map(|ext| ext.to_ascii_lowercase())
 }
 
+fn sanitize_original_filename(filename: &str) -> Result<String, AppError> {
+    let trimmed = filename.trim();
+
+    if trimmed.is_empty() {
+        return Err(AppError::Validation("上传文件名不能为空".to_string()));
+    }
+
+    if trimmed.len() > 255 {
+        return Err(AppError::Validation("上传文件名过长".to_string()));
+    }
+
+    if trimmed
+        .chars()
+        .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+    {
+        return Err(AppError::Validation("上传文件名包含非法字符".to_string()));
+    }
+
+    Ok(trimmed.to_string())
+}
+
 fn build_storage_target(upload_dir: &str, extension: &str) -> StorageTarget {
     let now = Utc::now();
     let uuid = Uuid::new_v4().to_string();
@@ -164,12 +185,8 @@ async fn read_upload_field(mut multipart: Multipart) -> Result<UploadFilePayload
 
         let original_filename = field
             .file_name()
-            .map(str::to_string)
             .ok_or_else(|| AppError::Validation("上传文件名不能为空".to_string()))?;
-
-        if original_filename.trim().is_empty() {
-            return Err(AppError::Validation("上传文件名不能为空".to_string()));
-        }
+        let original_filename = sanitize_original_filename(original_filename)?;
 
         let extension = extract_extension(&original_filename)
             .ok_or_else(|| AppError::Validation("仅支持 xlsx、xls、csv 文件".to_string()))?;
