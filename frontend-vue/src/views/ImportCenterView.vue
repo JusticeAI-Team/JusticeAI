@@ -30,10 +30,15 @@
     <section class="panel">
       <div class="section-header">
         <h2>导入列表</h2>
-        <span class="hint">后续接入分页统计</span>
+        <span v-if="total > 0" class="hint">第 {{ page }} 页 · 共 {{ total }} 条</span>
+        <span v-else class="hint">暂无导入记录</span>
       </div>
 
-      <div class="table-wrapper">
+      <p v-if="listLoading" class="hint">列表加载中...</p>
+      <p v-else-if="listError" class="error">{{ listError }}</p>
+      <p v-else-if="items.length === 0" class="hint">当前没有导入记录。</p>
+
+      <div v-else class="table-wrapper">
         <table class="table">
           <thead>
             <tr>
@@ -46,8 +51,15 @@
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td colspan="6" class="hint">下一轮将在这里接入导入列表数据。</td>
+            <tr v-for="item in items" :key="item.id">
+              <td>{{ item.id }}</td>
+              <td>{{ item.source_type }}</td>
+              <td>{{ item.status }}</td>
+              <td>{{ formatDateTime(item.created_at) }}</td>
+              <td>{{ formatDateTime(item.updated_at) }}</td>
+              <td>
+                <button type="button" disabled>查看详情</button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -60,6 +72,56 @@
     </section>
   </main>
 </template>
+
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { fetchImportList, type ImportListItem } from '../api/imports'
+
+const pageSize = ref(20)
+const items = ref<ImportListItem[]>([])
+const total = ref(0)
+const page = ref(1)
+const listLoading = ref(false)
+const listError = ref('')
+
+function formatDateTime(value?: string) {
+  if (!value) {
+    return '-'
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+async function loadList() {
+  listLoading.value = true
+  listError.value = ''
+
+  try {
+    const response = await fetchImportList({
+      page: page.value,
+      pageSize: pageSize.value,
+    })
+
+    items.value = response.items
+    total.value = response.total
+    page.value = response.page
+    pageSize.value = response.page_size
+  } catch (error) {
+    listError.value = error instanceof Error ? error.message : '列表加载失败'
+  } finally {
+    listLoading.value = false
+  }
+}
+
+onMounted(() => {
+  void loadList()
+})
+</script>
 
 <style scoped>
 .page {
@@ -114,6 +176,10 @@
 
 .hint {
   color: #666;
+}
+
+.error {
+  color: #c62828;
 }
 
 button,
