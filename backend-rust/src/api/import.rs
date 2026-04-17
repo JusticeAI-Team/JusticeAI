@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, State},
+    extract::{multipart::MultipartError, DefaultBodyLimit, Multipart, State},
+    http::StatusCode,
     routing::post,
     Router,
 };
@@ -174,11 +175,21 @@ fn cleanup_uploaded_file(target: &StorageTarget) {
     }
 }
 
+fn map_multipart_error(error: MultipartError) -> AppError {
+    match error.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => {
+            AppError::Validation("读取上传表单失败".to_string())
+        }
+        StatusCode::BAD_REQUEST => AppError::Validation("读取上传表单失败".to_string()),
+        _ => AppError::Internal,
+    }
+}
+
 async fn read_upload_field(mut multipart: Multipart) -> Result<UploadFilePayload, AppError> {
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|_| AppError::Validation("读取上传表单失败".to_string()))?
+        .map_err(map_multipart_error)?
     {
         if field.name() != Some("file") {
             continue;
@@ -200,7 +211,7 @@ async fn read_upload_field(mut multipart: Multipart) -> Result<UploadFilePayload
         let bytes = field
             .bytes()
             .await
-            .map_err(|_| AppError::Internal)?
+            .map_err(map_multipart_error)?
             .to_vec();
 
         if bytes.is_empty() {
