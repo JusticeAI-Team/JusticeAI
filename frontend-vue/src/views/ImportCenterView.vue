@@ -53,14 +53,20 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="item in items" :key="item.id">
+            <tr v-for="item in items" :key="item.id" :class="{ selected: isSelectedImport(item.id) }">
               <td>{{ item.id }}</td>
               <td>{{ item.source_type }}</td>
               <td>{{ item.status }}</td>
               <td>{{ formatDateTime(item.created_at) }}</td>
               <td>{{ formatDateTime(item.updated_at) }}</td>
               <td>
-                <button type="button" disabled>查看详情</button>
+                <button
+                  type="button"
+                  :disabled="detailLoading && selectedImportId === item.id"
+                  @click="handleSelectImport(item.id)"
+                >
+                  {{ detailLoading && selectedImportId === item.id ? '加载中...' : '查看详情' }}
+                </button>
               </td>
             </tr>
           </tbody>
@@ -79,14 +85,45 @@
 
     <section class="panel">
       <h2>导入详情</h2>
-      <p class="hint">请选择导入记录。</p>
+
+      <p v-if="detailLoading" class="hint">详情加载中...</p>
+      <p v-else-if="detailError" class="error">{{ detailError }}</p>
+      <p v-else-if="!selectedImportId || !detail" class="hint">请选择导入记录。</p>
+
+      <dl v-else class="detail-grid">
+        <div>
+          <dt>导入 ID</dt>
+          <dd>{{ detail.id }}</dd>
+        </div>
+        <div>
+          <dt>来源类型</dt>
+          <dd>{{ detail.source_type }}</dd>
+        </div>
+        <div>
+          <dt>状态</dt>
+          <dd>{{ detail.status }}</dd>
+        </div>
+        <div>
+          <dt>创建时间</dt>
+          <dd>{{ formatDateTime(detail.created_at) }}</dd>
+        </div>
+        <div>
+          <dt>更新时间</dt>
+          <dd>{{ formatDateTime(detail.updated_at) }}</dd>
+        </div>
+      </dl>
     </section>
   </main>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { fetchImportList, type ImportListItem } from '../api/imports'
+import {
+  fetchImportDetail,
+  fetchImportList,
+  type ImportDetailResponse,
+  type ImportListItem,
+} from '../api/imports'
 
 const pageSize = ref(20)
 const items = ref<ImportListItem[]>([])
@@ -96,6 +133,11 @@ const statusFilter = ref('')
 const appliedStatusFilter = ref('')
 const listLoading = ref(false)
 const listError = ref('')
+const selectedImportId = ref('')
+const detail = ref<ImportDetailResponse | null>(null)
+const detailLoading = ref(false)
+const detailError = ref('')
+const detailRequestId = ref(0)
 
 const totalPages = computed(() => (total.value === 0 ? 0 : Math.ceil(total.value / pageSize.value)))
 const hasPrevPage = computed(() => page.value > 1)
@@ -121,6 +163,43 @@ function formatDateTime(value?: string) {
   return date.toLocaleString('zh-CN', { hour12: false })
 }
 
+function resetDetail() {
+  detailRequestId.value += 1
+  selectedImportId.value = ''
+  detail.value = null
+  detailError.value = ''
+  detailLoading.value = false
+}
+
+async function loadDetail(importId: string) {
+  selectedImportId.value = importId
+
+  const requestId = ++detailRequestId.value
+  detailLoading.value = true
+  detailError.value = ''
+  detail.value = null
+
+  try {
+    const response = await fetchImportDetail(importId)
+
+    if (requestId !== detailRequestId.value) {
+      return
+    }
+
+    detail.value = response
+  } catch (error) {
+    if (requestId !== detailRequestId.value) {
+      return
+    }
+
+    detailError.value = error instanceof Error ? error.message : '详情加载失败'
+  } finally {
+    if (requestId === detailRequestId.value) {
+      detailLoading.value = false
+    }
+  }
+}
+
 async function loadList(options: { page?: number; status?: string } = {}) {
   listLoading.value = true
   listError.value = ''
@@ -137,6 +216,10 @@ async function loadList(options: { page?: number; status?: string } = {}) {
     page.value = response.page
     pageSize.value = response.page_size
     appliedStatusFilter.value = options.status ?? statusFilter.value
+
+    if (selectedImportId.value && !response.items.some((item) => item.id === selectedImportId.value)) {
+      resetDetail()
+    }
   } catch (error) {
     listError.value = error instanceof Error ? error.message : '列表加载失败'
   } finally {
@@ -183,6 +266,14 @@ async function handleNextPage() {
     page: page.value + 1,
     status: statusFilter.value,
   })
+}
+
+async function handleSelectImport(importId: string) {
+  await loadDetail(importId)
+}
+
+function isSelectedImport(importId: string) {
+  return selectedImportId.value === importId
 }
 
 onMounted(() => {
@@ -242,6 +333,33 @@ onMounted(() => {
   text-align: left;
   vertical-align: top;
   word-break: break-all;
+}
+
+.selected td {
+  background: #f8fafc;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.detail-grid div {
+  padding: 12px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.detail-grid dt {
+  color: #666;
+  font-weight: 600;
+}
+
+.detail-grid dd {
+  margin: 8px 0 0;
 }
 
 .hint {
