@@ -100,11 +100,14 @@
     <section class="panel">
       <h2>导入详情</h2>
 
-      <p v-if="detailLoading" class="hint">详情加载中...</p>
-      <p v-else-if="detailError" class="error">{{ detailError }}</p>
+      <p v-if="detailLoading && !detail" class="hint">详情加载中...</p>
+      <p v-else-if="detailError && !detail" class="error">{{ detailError }}</p>
       <p v-else-if="!selectedImportId || !detail" class="hint">请选择导入记录。</p>
 
-      <div v-else>
+      <p v-if="detailLoading && detail" class="hint">详情刷新中...</p>
+      <p v-else-if="detailError && detail" class="error">{{ detailError }}</p>
+
+      <div v-if="detail">
         <dl class="detail-grid">
           <div>
             <dt>导入 ID</dt>
