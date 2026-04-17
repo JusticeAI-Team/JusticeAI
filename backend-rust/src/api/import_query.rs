@@ -182,7 +182,7 @@ async fn query_import_list(
         r#"
         SELECT id, source_type, status, created_at, updated_at
         FROM imports
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT $1 OFFSET $2
         "#,
     )
@@ -203,7 +203,7 @@ async fn query_import_list_by_status(
         SELECT id, source_type, status, created_at, updated_at
         FROM imports
         WHERE status = $1
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT $2 OFFSET $3
         "#,
     )
