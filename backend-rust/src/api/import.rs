@@ -85,8 +85,12 @@ async fn upload(
         return Err(AppError::Internal);
     }
 
-    if tx.commit().await.is_err() {
-        cleanup_uploaded_file(&storage);
+    if let Err(err) = tx.commit().await {
+        tracing::warn!(
+            path = %storage.absolute_path.display(),
+            error = %err,
+            "导入事务提交失败，保留已写入文件以避免潜在已提交记录指向缺失文件"
+        );
         return Err(AppError::Internal);
     }
 
