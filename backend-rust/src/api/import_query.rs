@@ -84,6 +84,10 @@ struct ImportFileItem {
     created_at: DateTime<Utc>,
 }
 
+fn calculate_import_list_offset(page: i64, page_size: i64) -> i64 {
+    page.saturating_sub(1).saturating_mul(page_size)
+}
+
 fn normalize_import_list_query(query: ImportListQuery) -> NormalizedImportListQuery {
     let page = query.page.unwrap_or(1).max(1);
 
@@ -94,7 +98,7 @@ fn normalize_import_list_query(query: ImportListQuery) -> NormalizedImportListQu
         raw_page_size.min(100)
     };
 
-    let offset = page.saturating_sub(1).saturating_mul(page_size);
+    let offset = calculate_import_list_offset(page, page_size);
     let status = query
         .status
         .map(|value| value.trim().to_string())
