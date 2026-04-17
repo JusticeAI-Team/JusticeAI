@@ -17,13 +17,15 @@
       <div class="toolbar">
         <label>
           状态：
-          <select>
-            <option>全部</option>
-            <option>uploaded</option>
+          <select v-model="statusFilter" :disabled="listLoading" @change="handleStatusChange">
+            <option value="">全部</option>
+            <option value="uploaded">uploaded</option>
           </select>
         </label>
 
-        <button type="button">刷新列表</button>
+        <button type="button" :disabled="listLoading" @click="refreshList">
+          {{ listLoading ? '刷新中...' : '刷新列表' }}
+        </button>
       </div>
     </section>
 
@@ -31,12 +33,12 @@
       <div class="section-header">
         <h2>导入列表</h2>
         <span v-if="total > 0" class="hint">第 {{ page }} 页 · 共 {{ total }} 条</span>
-        <span v-else class="hint">暂无导入记录</span>
+        <span v-else class="hint">{{ listSummaryText }}</span>
       </div>
 
       <p v-if="listLoading" class="hint">列表加载中...</p>
       <p v-else-if="listError" class="error">{{ listError }}</p>
-      <p v-else-if="items.length === 0" class="hint">当前没有导入记录。</p>
+      <p v-else-if="items.length === 0" class="hint">{{ listEmptyMessage }}</p>
 
       <div v-else class="table-wrapper">
         <table class="table">
@@ -74,15 +76,25 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { fetchImportList, type ImportListItem } from '../api/imports'
 
 const pageSize = ref(20)
 const items = ref<ImportListItem[]>([])
 const total = ref(0)
 const page = ref(1)
+const statusFilter = ref('')
+const appliedStatusFilter = ref('')
 const listLoading = ref(false)
 const listError = ref('')
+
+const hasAppliedStatusFilter = computed(() => appliedStatusFilter.value !== '')
+const listSummaryText = computed(() =>
+  hasAppliedStatusFilter.value ? '当前筛选条件下暂无导入记录' : '暂无导入记录',
+)
+const listEmptyMessage = computed(() =>
+  hasAppliedStatusFilter.value ? '当前筛选条件下没有导入记录。' : '当前没有导入记录。',
+)
 
 function formatDateTime(value?: string) {
   if (!value) {
@@ -97,20 +109,22 @@ function formatDateTime(value?: string) {
   return date.toLocaleString('zh-CN', { hour12: false })
 }
 
-async function loadList() {
+async function loadList(options: { page?: number; status?: string } = {}) {
   listLoading.value = true
   listError.value = ''
 
   try {
     const response = await fetchImportList({
-      page: page.value,
+      page: options.page ?? page.value,
       pageSize: pageSize.value,
+      status: options.status || undefined,
     })
 
     items.value = response.items
     total.value = response.total
     page.value = response.page
     pageSize.value = response.page_size
+    appliedStatusFilter.value = options.status ?? statusFilter.value
   } catch (error) {
     listError.value = error instanceof Error ? error.message : '列表加载失败'
   } finally {
@@ -118,8 +132,30 @@ async function loadList() {
   }
 }
 
+async function refreshList() {
+  await loadList({
+    page: page.value,
+    status: statusFilter.value,
+  })
+}
+
+async function handleStatusChange() {
+  const previousStatus = appliedStatusFilter.value
+  await loadList({
+    page: 1,
+    status: statusFilter.value,
+  })
+
+  if (listError.value) {
+    statusFilter.value = previousStatus
+  }
+}
+
 onMounted(() => {
-  void loadList()
+  void loadList({
+    page: page.value,
+    status: statusFilter.value,
+  })
 })
 </script>
 
