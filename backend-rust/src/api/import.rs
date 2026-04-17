@@ -18,7 +18,8 @@ use crate::{
     },
 };
 
-const MAX_UPLOAD_REQUEST_BYTES: usize = 11 * 1024 * 1024;
+const MAX_UPLOAD_FILE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_UPLOAD_REQUEST_BYTES: usize = MAX_UPLOAD_FILE_BYTES + 1024 * 1024;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
