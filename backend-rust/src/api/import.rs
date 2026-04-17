@@ -218,6 +218,10 @@ async fn read_upload_field(mut multipart: Multipart) -> Result<UploadFilePayload
             return Err(AppError::Validation("上传文件不能为空".to_string()));
         }
 
+        if bytes.len() > MAX_UPLOAD_FILE_BYTES {
+            return Err(AppError::Validation("上传文件不能超过 10 MB".to_string()));
+        }
+
         return Ok(UploadFilePayload {
             original_filename,
             extension,
