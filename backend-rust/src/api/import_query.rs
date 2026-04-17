@@ -125,17 +125,19 @@ async fn list_imports(
     State(state): State<AppState>,
     Query(query): Query<ImportListQuery>,
 ) -> Result<axum::Json<ApiResponse<ImportListResponse>>, AppError> {
-    let query = normalize_import_list_query(query);
+    let mut query = normalize_import_list_query(query);
 
-    let (items, total) = match query.status.as_deref() {
-        Some(status) => (
-            query_import_list_by_status(state.db(), &query, status).await?,
-            query_import_total_by_status(state.db(), status).await?,
-        ),
-        None => (
-            query_import_list(state.db(), &query).await?,
-            query_import_total(state.db()).await?,
-        ),
+    let total = match query.status.as_deref() {
+        Some(status) => query_import_total_by_status(state.db(), status).await?,
+        None => query_import_total(state.db()).await?,
+    };
+
+    query.page = resolve_import_list_page(query.page, query.page_size, total);
+    query.offset = calculate_import_list_offset(query.page, query.page_size);
+
+    let items = match query.status.as_deref() {
+        Some(status) => query_import_list_by_status(state.db(), &query, status).await?,
+        None => query_import_list(state.db(), &query).await?,
     };
 
     Ok(ok(ImportListResponse {
