@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    http::{HeaderValue, Method},
+    http::{HeaderValue, Method, StatusCode},
     Router,
 };
 use reqwest::Client;
@@ -130,7 +130,10 @@ pub fn build_app(state: AppState) -> Router {
     Router::new()
         .nest("/api", api::routes())
         .with_state(state)
-        .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(30),
+        ))
         .layer(CompressionLayer::new())
         .layer(cors)
         .layer(TraceLayer::new_for_http())
