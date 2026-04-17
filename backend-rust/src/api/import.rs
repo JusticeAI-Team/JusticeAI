@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use axum::{
-    extract::{Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, State},
     routing::post,
     Router,
 };
@@ -18,8 +18,12 @@ use crate::{
     },
 };
 
+const MAX_UPLOAD_REQUEST_BYTES: usize = 11 * 1024 * 1024;
+
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/import/upload", post(upload))
+    Router::new()
+        .route("/import/upload", post(upload))
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_REQUEST_BYTES))
 }
 
 struct UploadFilePayload {
