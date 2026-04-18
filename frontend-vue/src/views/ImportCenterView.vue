@@ -305,12 +305,15 @@ async function handleUpload() {
     })
 
     if (listResult === 'success') {
-      if (items.value.some((item) => item.id === response.import_id)) {
-        await loadDetail(response.import_id)
-      } else {
+      if (!items.value.some((item) => item.id === response.import_id)) {
         uploadSuccessMessage.value = `上传成功：${response.file.original_filename}。列表尚未定位到新记录，请手动刷新重试。`
-        await loadDetail(response.import_id)
       }
+      await loadDetail(response.import_id)
+      return
+    }
+
+    if (listResult === 'stale') {
+      await loadDetail(response.import_id)
       return
     }
 
