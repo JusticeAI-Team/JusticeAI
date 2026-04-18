@@ -76,7 +76,7 @@
               <td>
                 <button
                   type="button"
-                  :disabled="uploading || (detailLoading && selectedImportId === item.id)"
+                  :disabled="uploading || listLoading || (detailLoading && selectedImportId === item.id)"
                   @click="handleSelectImport(item.id)"
                 >
                   {{ detailLoading && selectedImportId === item.id ? '加载中...' : '查看详情' }}
