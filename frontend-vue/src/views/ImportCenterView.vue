@@ -566,6 +566,10 @@ onMounted(() => {
   color: #666;
 }
 
+.success {
+  color: #2e7d32;
+}
+
 .error {
   color: #c62828;
 }
