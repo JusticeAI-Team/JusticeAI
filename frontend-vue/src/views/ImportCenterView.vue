@@ -87,7 +87,7 @@
         </table>
       </div>
 
-      <div v-if="total > 0" class="pagination">
+      <div v-if="totalPages > 1" class="pagination">
         <button type="button" :disabled="!hasPrevPage || listLoading || uploading" @click="handlePreviousPage">
           上一页
         </button>
