@@ -100,14 +100,14 @@
     <section class="panel">
       <h2>导入详情</h2>
 
-      <p v-if="detailLoading && !detail" class="hint">详情加载中...</p>
-      <p v-else-if="detailError && !detail" class="error">{{ detailError }}</p>
-      <p v-else-if="!selectedImportId || !detail" class="hint">请选择导入记录。</p>
+      <p v-if="detailLoading && !hasCurrentDetail" class="hint">详情加载中...</p>
+      <p v-else-if="detailError && !hasCurrentDetail" class="error">{{ detailError }}</p>
+      <p v-else-if="!selectedImportId || !hasCurrentDetail" class="hint">请选择导入记录。</p>
 
-      <p v-if="detailLoading && detail" class="hint">详情刷新中...</p>
-      <p v-else-if="detailError && detail" class="error">{{ detailError }}</p>
+      <p v-if="detailLoading && hasCurrentDetail" class="hint">详情刷新中...</p>
+      <p v-else-if="detailError && hasCurrentDetail" class="error">{{ detailError }}</p>
 
-      <div v-if="detail">
+      <div v-if="hasCurrentDetail">
         <dl class="detail-grid">
           <div>
             <dt>导入 ID</dt>
@@ -202,6 +202,7 @@ const totalPages = computed(() => (total.value === 0 ? 0 : Math.ceil(total.value
 const hasPrevPage = computed(() => page.value > 1)
 const hasNextPage = computed(() => totalPages.value > 0 && page.value < totalPages.value)
 const hasAppliedStatusFilter = computed(() => appliedStatusFilter.value !== '')
+const hasCurrentDetail = computed(() => detail.value?.id === selectedImportId.value)
 const listSummaryText = computed(() =>
   hasAppliedStatusFilter.value ? '当前筛选条件下暂无导入记录' : '暂无导入记录',
 )
