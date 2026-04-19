@@ -105,6 +105,7 @@ fn resolve_import_list_page(page: i64, page_size: i64, total: i64) -> i64 {
         return 1;
     }
 
+    let page_size = page_size.max(1);
     let total_pages = total.saturating_sub(1) / page_size + 1;
     page.min(total_pages)
 }
@@ -422,5 +423,10 @@ mod tests {
     #[test]
     fn resolve_import_list_page_clamps_out_of_range_page_to_last_page() {
         assert_eq!(resolve_import_list_page(9, 20, 41), 3);
+    }
+
+    #[test]
+    fn resolve_import_list_page_treats_zero_page_size_as_one() {
+        assert_eq!(resolve_import_list_page(5, 0, 3), 3);
     }
 }
