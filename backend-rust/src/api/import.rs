@@ -344,6 +344,22 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_original_filename_rejects_backslash() {
+        let error = sanitize_original_filename("案件\\台账.xlsx").unwrap_err();
+
+        assert!(matches!(error, AppError::Validation(message) if message == "上传文件名包含非法字符"));
+    }
+
+    #[test]
+    fn sanitize_original_filename_rejects_too_long_name() {
+        let filename = format!("{}.xlsx", "案".repeat(252));
+
+        let error = sanitize_original_filename(&filename).unwrap_err();
+
+        assert!(matches!(error, AppError::Validation(message) if message == "上传文件名过长"));
+    }
+
+    #[test]
     fn build_storage_target_uses_given_date_parts() {
         let now = Utc.with_ymd_and_hms(2026, 4, 17, 8, 30, 0).single().unwrap();
 
