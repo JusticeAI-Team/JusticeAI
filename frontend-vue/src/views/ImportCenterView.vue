@@ -377,11 +377,11 @@ async function loadList(options: {
       status: targetStatus || undefined,
     })
 
-    pageSize.value = response.page_size
-
     if (requestId !== listRequestId.value) {
       return 'stale'
     }
+
+    pageSize.value = response.page_size
 
     items.value = response.items
     total.value = response.total
