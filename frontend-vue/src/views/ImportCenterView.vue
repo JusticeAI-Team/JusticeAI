@@ -1,7 +1,12 @@
 <template>
   <main class="page">
-    <h1>导入中心</h1>
-    <p class="hint">上传 → 列表 → 详情 最小闭环联调页。</p>
+    <section class="intro panel">
+      <div>
+        <h2>导入中心</h2>
+        <p class="hint">上传 → 列表 → 详情 最小闭环联调页。</p>
+      </div>
+      <RouterLink class="secondary-link" to="/setup">返回系统准备页</RouterLink>
+    </section>
 
     <section class="panel">
       <h2>上传区</h2>
@@ -165,6 +170,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 import {
   fetchImportDetail,
   fetchImportList,
@@ -486,9 +492,19 @@ onMounted(() => {
 
 <style scoped>
 .page {
-  padding: 24px;
-  font-family: Arial, sans-serif;
   color: #1f2937;
+}
+
+.intro {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.intro h2 {
+  margin: 0 0 8px;
 }
 
 .panel {
@@ -574,9 +590,23 @@ onMounted(() => {
   color: #c62828;
 }
 
+.secondary-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  color: #1f2937;
+  text-decoration: none;
+  background: #fff;
+}
+
 button,
 select,
-input[type='file'] {
+input[type='file'],
+.secondary-link {
   font: inherit;
 }
 

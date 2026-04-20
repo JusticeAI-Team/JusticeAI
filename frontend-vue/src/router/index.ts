@@ -8,16 +8,25 @@ const router = createRouter({
     {
       path: '/',
       redirect: '/setup',
+      meta: {
+        navLabel: '系统准备',
+      },
     },
     {
       path: '/setup',
       name: 'setup',
       component: SystemSetupView,
+      meta: {
+        navLabel: '系统准备',
+      },
     },
     {
       path: '/imports',
       name: 'imports',
       component: ImportCenterView,
+      meta: {
+        navLabel: '导入中心',
+      },
     },
   ],
 })

@@ -13,10 +13,20 @@
           {{ checking ? '检查中...' : '重新检查后端状态' }}
         </button>
         <RouterLink class="secondary-link" :class="{ disabled: !canOpenImportCenter }" :to="canOpenImportCenter ? '/imports' : '/setup'">
-          进入导入中心
+          {{ openImportCenterLabel }}
         </RouterLink>
       </div>
     </header>
+
+    <section class="panel">
+      <h2>准备检查清单</h2>
+      <ul class="checklist">
+        <li :class="{ ready: !!systemInfo }">后端服务可访问</li>
+        <li :class="{ ready: !!healthInfo }">健康检查接口可读</li>
+        <li :class="{ ready: canOpenImportCenter }">可以进入导入中心</li>
+      </ul>
+      <p v-if="healthInfo" class="hint">最近检查时间：{{ formatDateTime(healthInfo.timestamp) }}</p>
+    </section>
 
     <section class="panel">
       <div class="section-header">
@@ -75,6 +85,22 @@
         <div>
           <dt>vLLM 模型</dt>
           <dd>{{ systemInfo.vllm.model_name }}</dd>
+        </div>
+        <div>
+          <dt>vLLM 地址</dt>
+          <dd>{{ systemInfo.vllm.base_url }}</dd>
+        </div>
+        <div>
+          <dt>HugeGraph REST</dt>
+          <dd>{{ systemInfo.hugegraph.base_url }}</dd>
+        </div>
+        <div>
+          <dt>HugeGraph Gremlin</dt>
+          <dd>{{ systemInfo.hugegraph.gremlin_url }}</dd>
+        </div>
+        <div>
+          <dt>Milvus 地址</dt>
+          <dd>{{ systemInfo.milvus.address }}</dd>
         </div>
         <div>
           <dt>上传目录</dt>
@@ -138,6 +164,18 @@ const systemError = ref('')
 const healthError = ref('')
 
 const canOpenImportCenter = computed(() => systemInfo.value !== null)
+const openImportCenterLabel = computed(() => {
+  if (!systemInfo.value) {
+    return '后端未连接'
+  }
+
+  if (healthInfo.value?.status === 'degraded') {
+    return '带警告进入导入中心'
+  }
+
+  return '进入导入中心'
+})
+
 const backendStatusLabel = computed(() => {
   if (checking.value) {
     return '检查中'
@@ -181,6 +219,15 @@ const backendStatusDescription = computed(() => {
 
   return '后端与核心依赖已经连通，可以继续进入导入中心。'
 })
+
+function formatDateTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
 
 async function checkSystemStatus() {
   checking.value = true
@@ -295,9 +342,14 @@ onMounted(() => {
 
 .steps,
 .config-list,
-.notes {
+.notes,
+.checklist {
   padding-left: 20px;
   color: #475569;
+}
+
+.checklist li.ready {
+  color: #2e7d32;
 }
 
 .detail-grid {
