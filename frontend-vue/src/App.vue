@@ -95,8 +95,26 @@ import { RouterLink } from 'vue-router'
 }
 
 .content {
-  max-width: 1280px;
+  max-width: 1120px;
   margin: 0 auto;
   padding: 24px;
+}
+
+@media (max-width: 768px) {
+  .topbar {
+    padding: 16px;
+  }
+
+  .nav {
+    width: 100%;
+  }
+
+  .nav-link {
+    flex: 1 1 calc(50% - 12px);
+  }
+
+  .content {
+    padding: 16px;
+  }
 }
 </style>

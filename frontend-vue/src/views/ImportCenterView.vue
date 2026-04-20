@@ -165,7 +165,7 @@
         </div>
       </div>
     </section>
-  </main>
+  </section>
 </template>
 
 <script setup lang="ts">
@@ -538,6 +538,7 @@ onMounted(() => {
 
 .table {
   width: 100%;
+  min-width: 720px;
   border-collapse: collapse;
   font-size: 14px;
 }
@@ -548,7 +549,7 @@ onMounted(() => {
   border-bottom: 1px solid #ebeef5;
   text-align: left;
   vertical-align: top;
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .selected td {
@@ -613,5 +614,23 @@ input[type='file'],
 button {
   padding: 6px 12px;
   cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .toolbar,
+  .upload-row,
+  .intro {
+    align-items: stretch;
+  }
+
+  .toolbar > *,
+  .upload-row > *,
+  .intro > * {
+    width: 100%;
+  }
+
+  input[type='file'] {
+    max-width: 100%;
+  }
 }
 </style>

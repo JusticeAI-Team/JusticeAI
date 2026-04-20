@@ -120,7 +120,8 @@
 
     <section class="panel" v-if="healthInfo">
       <h2>依赖健康状态</h2>
-      <table class="table">
+      <div class="table-wrapper">
+        <table class="table">
         <thead>
           <tr>
             <th>依赖</th>
@@ -145,12 +146,13 @@
             <td>{{ healthInfo.dependencies.milvus }}</td>
           </tr>
         </tbody>
-      </table>
+        </table>
+      </div>
       <ul v-if="healthInfo.notes.length > 0" class="notes">
         <li v-for="note in healthInfo.notes" :key="note">{{ note }}</li>
       </ul>
     </section>
-  </main>
+  </section>
 </template>
 
 <script setup lang="ts">
@@ -262,8 +264,6 @@ onMounted(() => {
 
 <style scoped>
 .page {
-  padding: 24px;
-  font-family: Arial, sans-serif;
   color: #1f2937;
 }
 
@@ -433,5 +433,21 @@ button {
   min-height: 36px;
   padding: 0 12px;
   cursor: pointer;
+}
+
+.table-wrapper {
+  overflow-x: auto;
+}
+
+@media (max-width: 768px) {
+  .hero-actions {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .secondary-link,
+  button {
+    width: 100%;
+  }
 }
 </style>
