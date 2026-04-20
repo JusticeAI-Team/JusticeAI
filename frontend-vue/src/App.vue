@@ -1,17 +1,18 @@
 <template>
   <div class="app-shell">
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
     <header class="topbar">
       <div>
         <p class="eyebrow">JusticeAI</p>
         <h1>本地联调控制台</h1>
       </div>
-      <nav class="nav">
+      <nav class="nav" aria-label="主导航">
         <RouterLink class="nav-link" to="/setup">系统准备</RouterLink>
         <RouterLink class="nav-link" to="/imports">导入中心</RouterLink>
       </nav>
     </header>
 
-    <main class="content">
+    <main id="main-content" class="content" tabindex="-1">
       <router-view />
     </main>
   </div>
@@ -26,6 +27,22 @@ import { RouterLink } from 'vue-router'
   min-height: 100vh;
   background: #f5f7fa;
   color: #1f2937;
+}
+
+.skip-link {
+  position: absolute;
+  left: 16px;
+  top: -48px;
+  z-index: 10;
+  padding: 8px 12px;
+  border-radius: 8px;
+  color: #fff;
+  background: #2e7d32;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  top: 16px;
 }
 
 .topbar {

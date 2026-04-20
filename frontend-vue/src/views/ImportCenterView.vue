@@ -1,8 +1,8 @@
 <template>
-  <main class="page">
+  <section class="page" aria-labelledby="import-center-title">
     <section class="intro panel">
       <div>
-        <h2>导入中心</h2>
+        <h1 id="import-center-title">导入中心</h1>
         <p class="hint">上传 → 列表 → 详情 最小闭环联调页。</p>
       </div>
       <RouterLink class="secondary-link" to="/setup">返回系统准备页</RouterLink>
@@ -24,8 +24,8 @@
       </div>
       <p v-if="selectedFile" class="hint">已选择：{{ selectedFile.name }}</p>
       <p class="hint">仅支持 csv、xls、xlsx，且文件不能超过 10 MB。</p>
-      <p v-if="uploadSuccessMessage" class="success">{{ uploadSuccessMessage }}</p>
-      <p v-if="uploadError" class="error">{{ uploadError }}</p>
+      <p v-if="uploadSuccessMessage" class="success" role="status" aria-live="polite">{{ uploadSuccessMessage }}</p>
+      <p v-if="uploadError" class="error" role="alert">{{ uploadError }}</p>
     </section>
 
     <section class="panel">
@@ -52,12 +52,12 @@
         <span v-else class="hint">{{ listSummaryText }}</span>
       </div>
 
-      <p v-if="listLoading && items.length === 0" class="hint">列表加载中...</p>
-      <p v-else-if="listError && items.length === 0" class="error">{{ listError }}</p>
+      <p v-if="listLoading && items.length === 0" class="hint" role="status" aria-live="polite">列表加载中...</p>
+      <p v-else-if="listError && items.length === 0" class="error" role="alert">{{ listError }}</p>
       <p v-else-if="items.length === 0" class="hint">{{ listEmptyMessage }}</p>
 
-      <p v-if="listLoading && items.length > 0" class="hint">列表刷新中...</p>
-      <p v-else-if="listError && items.length > 0" class="error">{{ listError }}</p>
+      <p v-if="listLoading && items.length > 0" class="hint" role="status" aria-live="polite">列表刷新中...</p>
+      <p v-else-if="listError && items.length > 0" class="error" role="alert">{{ listError }}</p>
 
       <div v-if="items.length > 0" class="table-wrapper">
         <table class="table">
@@ -105,12 +105,12 @@
     <section class="panel">
       <h2>导入详情</h2>
 
-      <p v-if="detailLoading && !hasCurrentDetail" class="hint">详情加载中...</p>
-      <p v-else-if="detailError && !hasCurrentDetail" class="error">{{ detailError }}</p>
+      <p v-if="detailLoading && !hasCurrentDetail" class="hint" role="status" aria-live="polite">详情加载中...</p>
+      <p v-else-if="detailError && !hasCurrentDetail" class="error" role="alert">{{ detailError }}</p>
       <p v-else-if="!selectedImportId || !hasCurrentDetail" class="hint">请选择导入记录。</p>
 
-      <p v-if="detailLoading && hasCurrentDetail" class="hint">详情刷新中...</p>
-      <p v-else-if="detailError && hasCurrentDetail" class="error">{{ detailError }}</p>
+      <p v-if="detailLoading && hasCurrentDetail" class="hint" role="status" aria-live="polite">详情刷新中...</p>
+      <p v-else-if="detailError && hasCurrentDetail" class="error" role="alert">{{ detailError }}</p>
 
       <div v-if="hasCurrentDetail">
         <dl class="detail-grid">

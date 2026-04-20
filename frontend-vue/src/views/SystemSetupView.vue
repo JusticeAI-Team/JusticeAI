@@ -1,9 +1,9 @@
 <template>
-  <main class="page">
+  <section class="page" aria-labelledby="setup-title">
     <header class="hero">
       <div>
         <p class="eyebrow">JusticeAI Setup</p>
-        <h1>先确认后端与配置，再进入图形界面</h1>
+        <h1 id="setup-title">先确认后端与配置，再进入图形界面</h1>
         <p class="lead">
           前端不会自动拉起后端。请先按这里的说明启动后端、修改根目录 <code>.env</code>，再继续进入导入中心。
         </p>
@@ -12,9 +12,10 @@
         <button type="button" :disabled="checking" @click="checkSystemStatus">
           {{ checking ? '检查中...' : '重新检查后端状态' }}
         </button>
-        <RouterLink class="secondary-link" :class="{ disabled: !canOpenImportCenter }" :to="canOpenImportCenter ? '/imports' : '/setup'">
+        <RouterLink v-if="canOpenImportCenter" class="secondary-link" to="/imports">
           {{ openImportCenterLabel }}
         </RouterLink>
+        <span v-else class="secondary-link disabled" aria-disabled="true">{{ openImportCenterLabel }}</span>
       </div>
     </header>
 
@@ -33,9 +34,9 @@
         <h2>后端连接状态</h2>
         <span class="badge" :class="backendStatusClass">{{ backendStatusLabel }}</span>
       </div>
-      <p class="hint">{{ backendStatusDescription }}</p>
-      <p v-if="systemError" class="error">{{ systemError }}</p>
-      <p v-if="healthError" class="error">{{ healthError }}</p>
+      <p class="hint" role="status" aria-live="polite">{{ backendStatusDescription }}</p>
+      <p v-if="systemError" class="error" role="alert">{{ systemError }}</p>
+      <p v-if="healthError" class="error" role="alert">{{ healthError }}</p>
     </section>
 
     <section class="panel">
