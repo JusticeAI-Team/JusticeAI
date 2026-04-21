@@ -40,9 +40,8 @@ pub fn routes() -> Router<AppState> {
         .route("/imports/:id/process", post(process_ingestion_action_live))
         .route("/mapping/summary", get(mapping_summary))
         .route("/mapping/current", get(mapping_current))
-        .route("/mapping/templates", get(mapping_templates))
+        .route("/mapping/templates", get(mapping_templates).post(save_mapping_template))
         .route("/mapping/templates/:id", get(mapping_template_detail))
-        .route("/mapping/templates", post(save_mapping_template))
         .route("/mapping/validate", post(validate_mapping))
         .route("/processing/summary", get(processing_summary))
         .route("/processing/runs", get(processing_runs))
@@ -79,9 +78,14 @@ pub fn routes() -> Router<AppState> {
         .route("/reports/generate", post(create_report_live))
         .route("/reports/:id", get(report_detail))
         .route("/reports/:id/regenerate", post(regenerate_report))
-        .route("/settings/platform", get(get_platform_settings_view).post(save_platform_settings_view))
-        .route("/settings/integrations", get(get_integrations_settings_view))
-        .route("/settings/integrations", post(save_integrations_settings))
+        .route(
+            "/settings/platform",
+            get(get_platform_settings_view).post(save_platform_settings_view),
+        )
+        .route(
+            "/settings/integrations",
+            get(get_integrations_settings_view).post(save_integrations_settings),
+        )
         .route("/settings/integrations/test", post(test_integrations_view))
 }
 
@@ -138,19 +142,6 @@ struct DashboardOverviewResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-struct StageItem {
-    stage_key: String,
-    stage_label: String,
-    status: String,
-    item_count: i32,
-    success_count: i32,
-    failure_count: i32,
-    started_at: String,
-    finished_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
 struct SummaryResponse {
     generated_at: String,
     metrics: Vec<SummaryMetric>,
@@ -161,6 +152,19 @@ struct SummaryResponse {
 struct StageSummaryResponse {
     generated_at: String,
     items: Vec<StageItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct StageItem {
+    stage_key: String,
+    stage_label: String,
+    status: String,
+    item_count: i32,
+    success_count: i32,
+    failure_count: i32,
+    started_at: String,
+    finished_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -260,6 +264,22 @@ struct SavePlatformSettingsRequest {
     upload_dir: Option<String>,
     report_dir: Option<String>,
     training_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct SaveIntegrationsSettingsRequest {
+    hugegraph_base_url: Option<String>,
+    hugegraph_gremlin_url: Option<String>,
+    milvus_address: Option<String>,
+    milvus_token: Option<String>,
+    milvus_collection: Option<String>,
+    model_base_url: Option<String>,
+    model_name: Option<String>,
+    model_request_style: Option<String>,
+    model_chat_endpoint: Option<String>,
+    model_json_mode_supported: Option<bool>,
+    openai_api_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -381,6 +401,7 @@ struct MappingTemplateListItem {
     version: String,
     status: String,
     source_type: String,
+    is_active: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -394,6 +415,7 @@ struct MappingFieldDto {
     status: String,
     sample_value: String,
     sort_order: i32,
+    required: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -404,6 +426,7 @@ struct MappingFieldItem {
     confidence: f32,
     status: String,
     sample_value: String,
+    required: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -415,6 +438,7 @@ struct MappingTemplateDetailResponse {
     version: String,
     status: String,
     source_type: String,
+    is_active: bool,
     fields: Vec<MappingFieldDto>,
     completion_rate: f32,
     missing_required_fields: Vec<String>,
@@ -462,6 +486,8 @@ struct ExtractionRunDto {
     success_count: i32,
     failure_count: i32,
     summary: Option<String>,
+    provider_style: String,
+    model_name: Option<String>,
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -520,6 +546,7 @@ struct GraphEdgeDto {
     relation_type: String,
     source: String,
     target: String,
+    confidence: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -577,6 +604,16 @@ struct RiskCaseListItem {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, FromRow)]
+struct RiskCaseRow {
+    id: Uuid,
+    title: String,
+    risk_level: String,
+    risk_score: f64,
+    area_name: String,
+    status: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 struct RiskItem {
@@ -594,27 +631,6 @@ struct RiskOverviewResponse {
     generated_at: String,
     metrics: Vec<MetricCard>,
     top_risks: Vec<RiskItem>,
-}
-
-#[derive(Debug, FromRow)]
-struct RiskCaseRow {
-    id: Uuid,
-    title: String,
-    risk_level: String,
-    risk_score: f64,
-    area_name: String,
-    status: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct RiskCaseDetailResponse {
-    case_info: RiskCaseView,
-    entities: Vec<KnowledgeEntityView>,
-    relations: Vec<GraphRelationView>,
-    alerts: Vec<AlertView>,
-    dispatch_tasks: Vec<DispatchTaskView>,
-    recommendations: RecommendationBundle,
 }
 
 #[derive(Debug, Serialize)]
@@ -659,6 +675,7 @@ struct GraphRelationView {
     relation_type: String,
     source_entity_id: Uuid,
     target_entity_id: Uuid,
+    confidence: f64,
     created_at: DateTime<Utc>,
 }
 
@@ -696,44 +713,34 @@ struct DispatchTaskView {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
+struct RiskCaseDetailResponse {
+    case_info: RiskCaseView,
+    entities: Vec<KnowledgeEntityView>,
+    relations: Vec<GraphRelationView>,
+    alerts: Vec<AlertView>,
+    dispatch_tasks: Vec<DispatchTaskView>,
+    recommendations: RecommendationBundle,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct SimilarCaseReference {
+    id: String,
+    case_id: String,
+    case_code: String,
+    title: String,
+    risk_level: String,
+    score: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
 struct RecommendationBundle {
     reason_summary: String,
     disposal_advice: Vec<String>,
+    reference_cases: Vec<SimilarCaseReference>,
     is_placeholder: bool,
     model_contract: AiModelContract,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct TrendPoint {
-    period: String,
-    value: f64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct EvaluationTrendResponse {
-    generated_at: String,
-    closure_rate: Vec<TrendPoint>,
-    alert_accuracy_placeholder: Vec<TrendPoint>,
-    review_pass_rate_placeholder: Vec<TrendPoint>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct EvaluationDimensionItem {
-    key: String,
-    label: String,
-    score: f64,
-    status: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct EvaluationSummaryResponse {
-    generated_at: String,
-    metrics: Vec<MetricCard>,
-    dimensions: Vec<EvaluationDimensionItem>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -785,6 +792,57 @@ struct DispatchTaskListItem {
     feedback_result: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct EvaluationDimensionItem {
+    key: String,
+    label: String,
+    score: f64,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct EvaluationSummaryResponse {
+    generated_at: String,
+    metrics: Vec<MetricCard>,
+    dimensions: Vec<EvaluationDimensionItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct TrendPoint {
+    period: String,
+    value: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct EvaluationTrendResponse {
+    generated_at: String,
+    closure_rate: Vec<TrendPoint>,
+    alert_accuracy_placeholder: Vec<TrendPoint>,
+    review_pass_rate_placeholder: Vec<TrendPoint>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct AgentStatusItem {
+    key: String,
+    label: String,
+    status: String,
+    running_tasks: u32,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct SupervisionOverviewResponse {
+    generated_at: String,
+    metrics: Vec<MetricCard>,
+    agents: Vec<AgentStatusItem>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -841,16 +899,6 @@ struct PlatformSettingsResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-struct IntegrationSettingsResponse {
-    generated_at: String,
-    database: IntegrationStatus,
-    hugegraph: IntegrationStatus,
-    milvus: IntegrationStatus,
-    model_service: ModelIntegrationStatus,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
 struct IntegrationStatus {
     key: String,
     endpoint: String,
@@ -876,43 +924,21 @@ struct ModelIntegrationStatus {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-struct IntegrationTestResponse {
+struct IntegrationSettingsResponse {
     generated_at: String,
+    database: IntegrationStatus,
     hugegraph: IntegrationStatus,
     milvus: IntegrationStatus,
     model_service: ModelIntegrationStatus,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct SaveIntegrationsSettingsRequest {
-    hugegraph_base_url: Option<String>,
-    hugegraph_gremlin_url: Option<String>,
-    milvus_address: Option<String>,
-    model_base_url: Option<String>,
-    model_name: Option<String>,
-    model_request_style: Option<String>,
-    model_chat_endpoint: Option<String>,
-    model_json_mode_supported: Option<bool>,
-    openai_api_key: Option<String>,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-struct AgentStatusItem {
-    key: String,
-    label: String,
-    status: String,
-    running_tasks: u32,
-    updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct SupervisionOverviewResponse {
+struct IntegrationTestResponse {
     generated_at: String,
-    metrics: Vec<MetricCard>,
-    agents: Vec<AgentStatusItem>,
+    hugegraph: IntegrationStatus,
+    milvus: IntegrationStatus,
+    model_service: ModelIntegrationStatus,
 }
 
 async fn dashboard_overview(
@@ -931,18 +957,7 @@ async fn dashboard_overview(
         "SELECT COUNT(*) FROM dispatch_tasks WHERE status IN ('assigned', 'in_progress')",
     )
     .await?;
-    let workflow_rows = sqlx::query_as::<_, WorkflowRunDto>(
-        r#"
-        SELECT id, stage_key, stage_label, status, started_at, finished_at,
-               item_count, success_count, failure_count, created_at, updated_at
-        FROM workflow_runs
-        ORDER BY started_at DESC, id DESC
-        LIMIT 12
-        "#,
-    )
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
+    let workflow_rows = latest_workflow_runs(state.db(), 12).await?;
 
     Ok(ok(DashboardOverviewResponse {
         generated_at: now(),
@@ -1010,7 +1025,9 @@ async fn dashboard_overview(
     }))
 }
 
-async fn dashboard_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
+async fn dashboard_summary(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let import_batches = count(state.db(), "SELECT COUNT(*) FROM imports").await?;
     let risk_cases = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
     let high_risk = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'").await?;
@@ -1021,30 +1038,20 @@ async fn dashboard_summary(State(state): State<AppState>) -> Result<Json<ApiResp
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_num("import_batches", "导入批次数", import_batches, "healthy", false),
-            metric_num("risk_cases", "风险案件总数", risk_cases, "healthy", false),
-            metric_num("high_risk_cases", "高风险案件数", high_risk, if high_risk > 0 { "warning" } else { "healthy" }, false),
-            metric_num("pending_alerts", "待处理预警数", pending_alerts, if pending_alerts > 0 { "warning" } else { "healthy" }, false),
-            metric_num("in_progress_tasks", "处理中任务数", in_progress_tasks, "healthy", false),
-            metric_num("generated_reports", "已生成报告数", reports, "healthy", false),
+            metric_num("import_batches", "Import Batches", import_batches, "healthy", false),
+            metric_num("risk_cases", "Risk Cases", risk_cases, "healthy", false),
+            metric_num("high_risk_cases", "High Risk Cases", high_risk, if high_risk > 0 { "warning" } else { "healthy" }, false),
+            metric_num("pending_alerts", "Pending Alerts", pending_alerts, if pending_alerts > 0 { "warning" } else { "healthy" }, false),
+            metric_num("in_progress_tasks", "In Progress Tasks", in_progress_tasks, "healthy", false),
+            metric_num("generated_reports", "Generated Reports", reports, "healthy", false),
         ],
     }))
 }
 
-async fn stage_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<StageSummaryResponse>>, AppError> {
-    let items = sqlx::query_as::<_, WorkflowRunDto>(
-        r#"
-        SELECT id, stage_key, stage_label, status, started_at, finished_at,
-               item_count, success_count, failure_count, created_at, updated_at
-        FROM workflow_runs
-        ORDER BY started_at DESC, id DESC
-        LIMIT 20
-        "#,
-    )
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
+async fn stage_summary(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<StageSummaryResponse>>, AppError> {
+    let items = latest_workflow_runs(state.db(), 20).await?;
     Ok(ok(StageSummaryResponse {
         generated_at: now(),
         items: items
@@ -1057,26 +1064,102 @@ async fn stage_summary(State(state): State<AppState>) -> Result<Json<ApiResponse
                 success_count: row.success_count,
                 failure_count: row.failure_count,
                 started_at: row.started_at.to_rfc3339(),
-                finished_at: row.finished_at.map(|v| v.to_rfc3339()),
+                finished_at: row.finished_at.map(|value| value.to_rfc3339()),
             })
             .collect(),
     }))
 }
 
-async fn ingestion_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
-    let uploaded = count(state.db(), "SELECT COUNT(*) FROM imports WHERE status = 'uploaded'").await?;
-    let mapping_pending = count(state.db(), "SELECT COUNT(*) FROM imports WHERE status = 'mapping_pending'").await?;
+async fn ingestion_summary_view(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<IngestionSummaryResponse>>, AppError> {
+    let batch_total = count(state.db(), "SELECT COUNT(*) FROM imports").await?;
+    let total_records = count(state.db(), "SELECT COALESCE(SUM(total_record_count), 0) FROM imports").await?;
     let processed = count(state.db(), "SELECT COUNT(*) FROM imports WHERE status = 'processed'").await?;
     let failed = count(state.db(), "SELECT COUNT(*) FROM imports WHERE status = 'failed'").await?;
 
-    Ok(ok(SummaryResponse {
+    let rows = sqlx::query_as::<_, IngestionSourceRow>(
+        r#"
+        SELECT
+            source_type,
+            COUNT(*)::BIGINT AS batch_count,
+            COALESCE(SUM(total_record_count), 0)::BIGINT AS record_count,
+            MAX(created_at) AS latest_import_at
+        FROM imports
+        GROUP BY source_type
+        ORDER BY latest_import_at DESC, source_type ASC
+        "#,
+    )
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(ok(IngestionSummaryResponse {
         generated_at: now(),
-        metrics: vec![
-            metric_num("uploaded", "已上传", uploaded, "healthy", false),
-            metric_num("mapping_pending", "待映射", mapping_pending, if mapping_pending > 0 { "warning" } else { "healthy" }, false),
-            metric_num("processed", "已处理", processed, "healthy", false),
-            metric_num("failed", "失败批次", failed, if failed > 0 { "critical" } else { "healthy" }, false),
+        totals: vec![
+            metric_card("batch_total", "Batch Total", batch_total.to_string(), None, None, None, "healthy"),
+            metric_card("record_total", "Record Total", total_records.to_string(), None, None, None, "healthy"),
+            metric_card("processed", "Processed Batches", processed.to_string(), None, None, None, "healthy"),
+            metric_card("failed", "Failed Batches", failed.to_string(), None, None, None, if failed > 0 { "critical" } else { "healthy" }),
         ],
+        sources: rows
+            .into_iter()
+            .map(|row| IngestionSourceSummary {
+                source_key: row.source_type.clone(),
+                source_label: source_label(&row.source_type).to_string(),
+                batch_count: row.batch_count.max(0) as u32,
+                record_count: row.record_count.max(0) as u32,
+                latest_import_at: row.latest_import_at.to_rfc3339(),
+                status: if row.batch_count > 0 { "healthy" } else { "warning" }.to_string(),
+            })
+            .collect(),
+    }))
+}
+
+async fn ingestion_batches(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<IngestionBatchListResponse>>, AppError> {
+    let rows = sqlx::query_as::<_, IngestionBatchRow>(
+        r#"
+        SELECT
+            i.id,
+            i.source_type,
+            i.status,
+            i.created_at,
+            COALESCE(i.total_record_count, 0) AS record_count,
+            COALESCE(i.failed_record_count, 0) AS error_count,
+            f.original_filename AS file_name
+        FROM imports i
+        LEFT JOIN LATERAL (
+            SELECT original_filename
+            FROM import_files
+            WHERE import_id = i.id
+            ORDER BY created_at ASC
+            LIMIT 1
+        ) f ON TRUE
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT 20
+        "#,
+    )
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(ok(IngestionBatchListResponse {
+        generated_at: now(),
+        items: rows
+            .into_iter()
+            .map(|row| IngestionBatchItem {
+                id: row.id.to_string(),
+                source_key: row.source_type.clone(),
+                source_label: source_label(&row.source_type).to_string(),
+                file_name: row.file_name.unwrap_or_else(|| "unnamed-file".to_string()),
+                status: row.status,
+                record_count: row.record_count.max(0) as i32,
+                error_count: row.error_count.max(0) as i32,
+                imported_at: row.created_at.to_rfc3339(),
+            })
+            .collect(),
     }))
 }
 
@@ -1119,7 +1202,7 @@ async fn ingestion_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<IngestionDetailResponse>>, AppError> {
     let item = sqlx::query_as::<_, IngestionItem>(
-        r#"SELECT id, source_type, status, created_at, updated_at FROM imports WHERE id = $1"#,
+        "SELECT id, source_type, status, created_at, updated_at FROM imports WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(state.db())
@@ -1130,7 +1213,9 @@ async fn ingestion_detail(
     let files = sqlx::query_as::<_, ImportFileDto>(
         r#"
         SELECT id, original_filename, stored_filename, stored_path, file_size, mime_type, created_at
-        FROM import_files WHERE import_id = $1 ORDER BY created_at ASC
+        FROM import_files
+        WHERE import_id = $1
+        ORDER BY created_at ASC
         "#,
     )
     .bind(id)
@@ -1138,14 +1223,15 @@ async fn ingestion_detail(
     .await
     .map_err(|_| AppError::Internal)?;
 
-    let created_case_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM risk_cases WHERE import_id = $1")
-        .bind(id)
-        .fetch_one(state.db())
-        .await
-        .map_err(|_| AppError::Internal)?;
+    let created_case_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM risk_cases WHERE import_id = $1")
+            .bind(id)
+            .fetch_one(state.db())
+            .await
+            .map_err(|_| AppError::Internal)?;
 
     let processing_run_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM workflow_runs WHERE stage_key = 'processing'"
+        "SELECT COUNT(*) FROM workflow_runs WHERE stage_key = 'processing'",
     )
     .fetch_one(state.db())
     .await
@@ -1166,57 +1252,98 @@ async fn ingestion_detail(
     }))
 }
 
-async fn process_ingestion_action(
+async fn process_ingestion_action_live(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
-    let now_at = Utc::now();
-    let result = sqlx::query("UPDATE imports SET status = 'ready_to_process', updated_at = $2 WHERE id = $1")
-        .bind(id)
-        .bind(now_at)
-        .execute(state.db())
-        .await
-        .map_err(|_| AppError::Internal)?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound);
-    }
-
-    insert_workflow_run(
-        state.db(),
-        "processing",
-        "数据处理",
-        "queued",
-        0,
-        0,
-        0,
-        now_at,
-    )
-    .await?;
+    let integration_values = load_setting_map(state.db(), "integrations").await?;
+    let ai_service = build_ai_service(&state, &integration_values);
+    let vector_store = build_vector_store(&state, &integration_values);
+    let result = process_import_batch(&state, id, &ai_service, &vector_store).await?;
 
     Ok(ok(ActionResponse {
-        id: id.to_string(),
-        status: "ready_to_process".to_string(),
-        message: "批次已进入待处理状态，可由前端继续触发正式处理流程".to_string(),
-        updated_at: now_at.to_rfc3339(),
-        is_placeholder: true,
+        id: result.import_id.to_string(),
+        status: result.status,
+        message: format!(
+            "processed {} records into {} cases with {} failed records",
+            result.total_record_count, result.affected_case_count, result.failed_record_count
+        ),
+        updated_at: result.finished_at.to_rfc3339(),
+        is_placeholder: false,
     }))
 }
 
-async fn mapping_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
+async fn mapping_summary(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let total = count(state.db(), "SELECT COUNT(*) FROM mapping_templates").await?;
-    let active = count(state.db(), "SELECT COUNT(*) FROM mapping_templates WHERE status IN ('active', 'published', 'draft')").await?;
+    let active = count(
+        state.db(),
+        "SELECT COUNT(*) FROM mapping_templates WHERE status IN ('active', 'published', 'draft')",
+    )
+    .await?;
     let fields = count(state.db(), "SELECT COUNT(*) FROM mapping_fields").await?;
-    let needs_review = count(state.db(), "SELECT COUNT(*) FROM mapping_fields WHERE status = 'needs_review'").await?;
+    let needs_review =
+        count(state.db(), "SELECT COUNT(*) FROM mapping_fields WHERE status = 'needs_review'").await?;
 
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_num("template_total", "模板总数", total, "healthy", false),
-            metric_num("template_active", "可用模板", active, "healthy", false),
-            metric_num("field_total", "映射字段数", fields, "healthy", false),
-            metric_num("needs_review", "待复核字段", needs_review, if needs_review > 0 { "warning" } else { "healthy" }, false),
+            metric_num("template_total", "Template Total", total, "healthy", false),
+            metric_num("template_active", "Active Templates", active, "healthy", false),
+            metric_num("field_total", "Mapped Fields", fields, "healthy", false),
+            metric_num(
+                "needs_review",
+                "Fields Pending Review",
+                needs_review,
+                if needs_review > 0 { "warning" } else { "healthy" },
+                false,
+            ),
         ],
+    }))
+}
+
+async fn mapping_current(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<MappingCurrentResponse>>, AppError> {
+    let template = sqlx::query_as::<_, MappingTemplateListItem>(
+        r#"
+        SELECT id, template_key, template_label, version, status, source_type, is_active, created_at, updated_at
+        FROM mapping_templates
+        ORDER BY is_active DESC, updated_at DESC, created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or(AppError::NotFound)?;
+
+    let fields = load_mapping_field_rows(state.db(), template.id).await?;
+    let completion_rate = compute_mapping_completion_rate(&fields);
+    let missing_required_fields = compute_missing_required_fields(&fields);
+
+    Ok(ok(MappingCurrentResponse {
+        generated_at: now(),
+        template_id: template.id.to_string(),
+        template_key: template.template_key,
+        template_label: template.template_label,
+        version: template.version,
+        status: template.status,
+        source_type: template.source_type,
+        completion_rate,
+        missing_required_fields,
+        fields: fields
+            .into_iter()
+            .map(|field| MappingFieldItem {
+                source_field: field.source_field,
+                target_field: field.target_field,
+                confidence: field.confidence as f32,
+                status: field.status,
+                sample_value: field.sample_value,
+                required: field.required,
+            })
+            .collect(),
     }))
 }
 
@@ -1231,7 +1358,7 @@ async fn mapping_templates(
 
     let items = sqlx::query_as::<_, MappingTemplateListItem>(
         r#"
-        SELECT id, template_key, template_label, version, status, source_type, created_at, updated_at
+        SELECT id, template_key, template_label, version, status, source_type, is_active, created_at, updated_at
         FROM mapping_templates
         WHERE ($1::TEXT IS NULL OR source_type = $1)
         ORDER BY updated_at DESC, id DESC
@@ -1260,8 +1387,9 @@ async fn mapping_template_detail(
 ) -> Result<Json<ApiResponse<MappingTemplateDetailResponse>>, AppError> {
     let template = sqlx::query_as::<_, MappingTemplateListItem>(
         r#"
-        SELECT id, template_key, template_label, version, status, source_type, created_at, updated_at
-        FROM mapping_templates WHERE id = $1
+        SELECT id, template_key, template_label, version, status, source_type, is_active, created_at, updated_at
+        FROM mapping_templates
+        WHERE id = $1
         "#,
     )
     .bind(id)
@@ -1270,19 +1398,9 @@ async fn mapping_template_detail(
     .map_err(|_| AppError::Internal)?
     .ok_or(AppError::NotFound)?;
 
-    let fields = sqlx::query_as::<_, MappingFieldDto>(
-        r#"
-        SELECT source_field, target_field, confidence, status, sample_value, sort_order
-        FROM mapping_fields WHERE template_id = $1 ORDER BY sort_order ASC, created_at ASC
-        "#,
-    )
-    .bind(id)
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    let missing_required_fields = compute_missing_required_fields(&fields);
+    let fields = load_mapping_field_rows(state.db(), template.id).await?;
     let completion_rate = compute_mapping_completion_rate(&fields);
+    let missing_required_fields = compute_missing_required_fields(&fields);
 
     Ok(ok(MappingTemplateDetailResponse {
         id: template.id.to_string(),
@@ -1291,6 +1409,7 @@ async fn mapping_template_detail(
         version: template.version,
         status: template.status,
         source_type: template.source_type,
+        is_active: template.is_active,
         fields,
         completion_rate,
         missing_required_fields,
@@ -1307,14 +1426,17 @@ async fn save_mapping_template(
 
     let template_id = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO mapping_templates (id, template_key, template_label, version, status, source_type, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO mapping_templates (
+            id, template_key, template_label, version, status, source_type, is_active, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
         ON CONFLICT (template_key)
         DO UPDATE SET
             template_label = EXCLUDED.template_label,
             version = EXCLUDED.version,
             status = EXCLUDED.status,
             source_type = EXCLUDED.source_type,
+            is_active = EXCLUDED.is_active,
             updated_at = EXCLUDED.updated_at
         RETURNING id
         "#,
@@ -1325,7 +1447,7 @@ async fn save_mapping_template(
     .bind(payload.version.trim())
     .bind(payload.status.trim())
     .bind(payload.source_type.trim())
-    .bind(now_at)
+    .bind(false)
     .bind(now_at)
     .fetch_one(&mut *tx)
     .await
@@ -1342,9 +1464,9 @@ async fn save_mapping_template(
             r#"
             INSERT INTO mapping_fields (
                 id, template_id, source_field, target_field, confidence, status,
-                sample_value, sort_order, created_at, updated_at
+                sample_value, sort_order, required, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
             "#,
         )
         .bind(Uuid::new_v4())
@@ -1355,7 +1477,7 @@ async fn save_mapping_template(
         .bind(field.status.trim())
         .bind(field.sample_value.trim())
         .bind(index as i32)
-        .bind(now_at)
+        .bind(matches!(field.target_field.as_str(), "case_title" | "area_name" | "occurred_at"))
         .bind(now_at)
         .execute(&mut *tx)
         .await
@@ -1372,8 +1494,11 @@ async fn validate_mapping(
 ) -> Result<Json<ApiResponse<HashMap<String, serde_json::Value>>>, AppError> {
     let template = sqlx::query_as::<_, MappingTemplateListItem>(
         r#"
-        SELECT id, template_key, template_label, version, status, source_type, created_at, updated_at
-        FROM mapping_templates WHERE source_type = $1 ORDER BY updated_at DESC LIMIT 1
+        SELECT id, template_key, template_label, version, status, source_type, is_active, created_at, updated_at
+        FROM mapping_templates
+        WHERE source_type = $1
+        ORDER BY is_active DESC, updated_at DESC
+        LIMIT 1
         "#,
     )
     .bind(payload.source_type.trim())
@@ -1382,43 +1507,60 @@ async fn validate_mapping(
     .map_err(|_| AppError::Internal)?
     .ok_or(AppError::NotFound)?;
 
-    let fields = sqlx::query_as::<_, MappingFieldDto>(
-        r#"SELECT source_field, target_field, confidence, status, sample_value, sort_order FROM mapping_fields WHERE template_id = $1"#,
-    )
-    .bind(template.id)
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    let mapped_targets = fields.iter().map(|f| f.target_field.clone()).collect::<Vec<_>>();
-    let missing = payload
+    let fields = load_mapping_field_rows(state.db(), template.id).await?;
+    let mapped_targets = fields.iter().map(|field| field.target_field.clone()).collect::<Vec<_>>();
+    let missing_required_fields = payload
         .required_fields
         .into_iter()
-        .filter(|key| !mapped_targets.iter().any(|mapped| mapped == key))
+        .filter(|required| !mapped_targets.iter().any(|mapped| mapped == required))
         .collect::<Vec<_>>();
 
     let mut data = HashMap::new();
-    data.insert("template_id".to_string(), serde_json::json!(template.id));
-    data.insert("is_valid".to_string(), serde_json::json!(missing.is_empty()));
-    data.insert("missing_required_fields".to_string(), serde_json::json!(missing));
-    data.insert("completion_rate".to_string(), serde_json::json!(compute_mapping_completion_rate(&fields)));
+    data.insert("template_id".to_string(), serde_json::json!(template.id.to_string()));
+    data.insert("is_valid".to_string(), serde_json::json!(missing_required_fields.is_empty()));
+    data.insert(
+        "missing_required_fields".to_string(),
+        serde_json::json!(missing_required_fields),
+    );
+    data.insert(
+        "completion_rate".to_string(),
+        serde_json::json!(compute_mapping_completion_rate(&fields)),
+    );
 
     Ok(ok(data))
 }
 
-async fn processing_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
-    let queued = count(state.db(), "SELECT COUNT(*) FROM workflow_runs WHERE stage_key = 'processing' AND status = 'queued'").await?;
-    let running = count(state.db(), "SELECT COUNT(*) FROM workflow_runs WHERE stage_key = 'processing' AND status = 'running'").await?;
-    let completed = count(state.db(), "SELECT COUNT(*) FROM workflow_runs WHERE stage_key = 'processing' AND status = 'completed'").await?;
-    let failed = count(state.db(), "SELECT COUNT(*) FROM workflow_runs WHERE stage_key = 'processing' AND status = 'failed'").await?;
+async fn processing_summary(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
+    let queued = count(
+        state.db(),
+        "SELECT COUNT(*) FROM workflow_runs WHERE stage_key = 'processing' AND status = 'queued'",
+    )
+    .await?;
+    let running = count(
+        state.db(),
+        "SELECT COUNT(*) FROM workflow_runs WHERE stage_key = 'processing' AND status = 'running'",
+    )
+    .await?;
+    let completed = count(
+        state.db(),
+        "SELECT COUNT(*) FROM workflow_runs WHERE stage_key = 'processing' AND status = 'completed'",
+    )
+    .await?;
+    let failed = count(
+        state.db(),
+        "SELECT COUNT(*) FROM workflow_runs WHERE stage_key = 'processing' AND status = 'failed'",
+    )
+    .await?;
 
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_num("queued", "待处理任务", queued, if queued > 0 { "warning" } else { "healthy" }, false),
-            metric_num("running", "处理中任务", running, "healthy", false),
-            metric_num("completed", "已完成处理", completed, "healthy", false),
-            metric_num("failed", "处理失败", failed, if failed > 0 { "critical" } else { "healthy" }, false),
+            metric_num("queued", "Queued Tasks", queued, if queued > 0 { "warning" } else { "healthy" }, false),
+            metric_num("running", "Running Tasks", running, "healthy", false),
+            metric_num("completed", "Completed Tasks", completed, "healthy", false),
+            metric_num("failed", "Failed Tasks", failed, if failed > 0 { "critical" } else { "healthy" }, false),
         ],
     }))
 }
@@ -1443,30 +1585,54 @@ async fn retry_processing_run(
 ) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
     ensure_workflow_run_exists(state.db(), id, "processing").await?;
     let now_at = Utc::now();
-    insert_workflow_run(state.db(), "processing", "数据处理", "queued", 0, 0, 0, now_at).await?;
+    insert_workflow_run(state.db(), "processing", "Data Processing", "queued", 0, 0, 0, now_at)
+        .await?;
     Ok(ok(ActionResponse {
         id: id.to_string(),
         status: "queued".to_string(),
-        message: "已创建新的处理重试任务".to_string(),
+        message: "created a new processing retry run".to_string(),
         updated_at: now_at.to_rfc3339(),
-        is_placeholder: true,
+        is_placeholder: false,
     }))
 }
 
-async fn extraction_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
-    let runs = count(state.db(), "SELECT COUNT(*) FROM extraction_runs").await?;
-    let completed = count(state.db(), "SELECT COUNT(*) FROM extraction_runs WHERE status = 'completed'").await?;
-    let entities = count(state.db(), "SELECT COUNT(*) FROM knowledge_entities").await?;
-    let relations = count(state.db(), "SELECT COUNT(*) FROM graph_relations").await?;
+async fn extraction_summary_view(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<ExtractionSummaryResponse>>, AppError> {
+    let entity_total = count(state.db(), "SELECT COUNT(*) FROM knowledge_entities").await?;
+    let relation_total = count(state.db(), "SELECT COUNT(*) FROM graph_relations").await?;
+    let completed_runs =
+        count(state.db(), "SELECT COUNT(*) FROM extraction_runs WHERE status LIKE 'completed%'").await?;
 
-    Ok(ok(SummaryResponse {
+    let rows = sqlx::query_as::<_, ExtractionEntityRow>(
+        r#"
+        SELECT id, entity_type, entity_name, confidence, extracted_at
+        FROM knowledge_entities
+        ORDER BY extracted_at DESC, id DESC
+        LIMIT 10
+        "#,
+    )
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(ok(ExtractionSummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_num("runs", "抽取运行数", runs, "healthy", false),
-            metric_num("completed", "成功抽取数", completed, "healthy", false),
-            metric_num("entities", "实体总数", entities, "healthy", false),
-            metric_num("relations", "关系总数", relations, "healthy", false),
+            metric_card("entities", "Entities", entity_total.to_string(), None, None, None, "healthy"),
+            metric_card("relations", "Relations", relation_total.to_string(), None, None, None, "healthy"),
+            metric_card("completed_runs", "Completed Runs", completed_runs.to_string(), None, None, None, "healthy"),
         ],
+        recent_entities: rows
+            .into_iter()
+            .map(|row| ExtractionEntityItem {
+                id: row.id.to_string(),
+                entity_type: row.entity_type,
+                name: row.entity_name,
+                confidence: row.confidence as f32,
+                extracted_at: row.extracted_at.to_rfc3339(),
+            })
+            .collect(),
     }))
 }
 
@@ -1482,7 +1648,7 @@ async fn extraction_runs(
     let items = sqlx::query_as::<_, ExtractionRunDto>(
         r#"
         SELECT id, scope_type, mode, status, item_count, success_count, failure_count, summary,
-               started_at, finished_at, created_at, updated_at
+               provider_style, model_name, started_at, finished_at, created_at, updated_at
         FROM extraction_runs
         WHERE ($1::TEXT IS NULL OR status = $1)
         ORDER BY started_at DESC, id DESC
@@ -1512,8 +1678,9 @@ async fn extraction_run_detail(
     let item = sqlx::query_as::<_, ExtractionRunDto>(
         r#"
         SELECT id, scope_type, mode, status, item_count, success_count, failure_count, summary,
-               started_at, finished_at, created_at, updated_at
-        FROM extraction_runs WHERE id = $1
+               provider_style, model_name, started_at, finished_at, created_at, updated_at
+        FROM extraction_runs
+        WHERE id = $1
         "#,
     )
     .bind(id)
@@ -1525,55 +1692,90 @@ async fn extraction_run_detail(
     Ok(ok(item))
 }
 
-async fn create_extraction_run(
+async fn create_extraction_run_live(
     State(state): State<AppState>,
     Json(payload): Json<CreateExtractionRunRequest>,
 ) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
-    let now_at = Utc::now();
-    let case_count = payload.case_ids.as_ref().map(|ids| ids.len()).unwrap_or(0) as i32;
-    let run_id = Uuid::new_v4();
-    let mode = payload.mode.unwrap_or_else(|| "incremental".to_string());
-    sqlx::query(
-        r#"
-        INSERT INTO extraction_runs (
-            id, scope_type, mode, status, item_count, success_count, failure_count,
-            summary, started_at, finished_at, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, 0, 0, $6, $7, NULL, $7, $7)
-        "#,
+    let integration_values = load_setting_map(state.db(), "integrations").await?;
+    let ai_service = build_ai_service(&state, &integration_values);
+    let graph_service = build_hugegraph_service(&state, &integration_values);
+    let vector_store = build_vector_store(&state, &integration_values);
+    let result = execute_extraction_run(
+        &state,
+        payload.case_ids,
+        payload.mode,
+        &ai_service,
+        &graph_service,
+        &vector_store,
     )
-    .bind(run_id)
-    .bind(if case_count > 0 { "selected_cases" } else { "all_recent_cases" })
-    .bind(mode)
-    .bind("queued")
-    .bind(case_count)
-    .bind("等待执行抽取，当前为占位运行记录")
-    .bind(now_at)
-    .execute(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
+    .await?;
 
     Ok(ok(ActionResponse {
-        id: run_id.to_string(),
-        status: "queued".to_string(),
-        message: "抽取任务已登记，后续可替换为 vLLM/OpenAI ChatCompletion 风格实现".to_string(),
-        updated_at: now_at.to_rfc3339(),
-        is_placeholder: true,
+        id: result.run_id.to_string(),
+        status: result.status,
+        message: format!(
+            "processed {} cases, created {} entities and {} relations",
+            result.item_count, result.created_entity_count, result.created_relation_count
+        ),
+        updated_at: result.finished_at.to_rfc3339(),
+        is_placeholder: false,
     }))
 }
 
-async fn graph_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
+async fn graph_summary(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let nodes = count(state.db(), "SELECT COUNT(*) FROM knowledge_entities").await?;
     let edges = count(state.db(), "SELECT COUNT(*) FROM graph_relations").await?;
-    let cases = count(state.db(), "SELECT COUNT(DISTINCT case_id) FROM knowledge_entities").await?;
+    let covered_cases =
+        count(state.db(), "SELECT COUNT(DISTINCT case_id) FROM knowledge_entities").await?;
 
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_num("nodes", "图谱节点", nodes, "healthy", false),
-            metric_num("edges", "图谱边", edges, "healthy", false),
-            metric_num("covered_cases", "已建图案件", cases, "healthy", false),
-            metric_bool("hugegraph_sync", "HugeGraph 同步", false, "placeholder", true),
+            metric_num("nodes", "Graph Nodes", nodes, "healthy", false),
+            metric_num("edges", "Graph Edges", edges, "healthy", false),
+            metric_num("covered_cases", "Cases With Graph", covered_cases, "healthy", false),
+            metric_bool("hugegraph_sync", "HugeGraph Sync", false, "placeholder", true),
         ],
+    }))
+}
+
+async fn graph_overview(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<GraphOverviewResponse>>, AppError> {
+    let nodes = count(state.db(), "SELECT COUNT(*) FROM knowledge_entities").await?;
+    let edges = count(state.db(), "SELECT COUNT(*) FROM graph_relations").await?;
+    let covered_cases =
+        count(state.db(), "SELECT COUNT(DISTINCT case_id) FROM knowledge_entities").await?;
+
+    let relation_rows = sqlx::query_as::<_, RelationTypeRow>(
+        r#"
+        SELECT relation_type, COUNT(*)::BIGINT AS relation_count
+        FROM graph_relations
+        GROUP BY relation_type
+        ORDER BY relation_count DESC, relation_type ASC
+        "#,
+    )
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(ok(GraphOverviewResponse {
+        generated_at: now(),
+        metrics: vec![
+            metric_card("nodes", "Nodes", nodes.to_string(), None, None, None, "healthy"),
+            metric_card("edges", "Edges", edges.to_string(), None, None, None, "healthy"),
+            metric_card("covered_cases", "Cases With Graph", covered_cases.to_string(), None, None, None, "healthy"),
+        ],
+        relation_types: relation_rows
+            .into_iter()
+            .map(|row| RelationTypeItem {
+                key: row.relation_type.clone(),
+                label: relation_label(&row.relation_type).to_string(),
+                count: row.relation_count.max(0) as u32,
+            })
+            .collect(),
     }))
 }
 
@@ -1582,7 +1784,12 @@ async fn graph_case_view(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<GraphCaseResponse>>, AppError> {
     let nodes = sqlx::query_as::<_, KnowledgeEntityView>(
-        r#"SELECT id, entity_type, entity_name, confidence, extracted_at FROM knowledge_entities WHERE case_id = $1 ORDER BY extracted_at DESC"#,
+        r#"
+        SELECT id, entity_type, entity_name, confidence, extracted_at
+        FROM knowledge_entities
+        WHERE case_id = $1
+        ORDER BY extracted_at DESC
+        "#,
     )
     .bind(id)
     .fetch_all(state.db())
@@ -1591,10 +1798,13 @@ async fn graph_case_view(
 
     let edges = sqlx::query_as::<_, GraphRelationView>(
         r#"
-        SELECT gr.id, gr.relation_type, gr.source_entity_id, gr.target_entity_id, gr.created_at
+        SELECT gr.id, gr.relation_type, gr.source_entity_id, gr.target_entity_id, gr.confidence, gr.created_at
         FROM graph_relations gr
-        WHERE EXISTS (SELECT 1 FROM knowledge_entities ke WHERE ke.case_id = $1 AND ke.id = gr.source_entity_id)
-           OR EXISTS (SELECT 1 FROM knowledge_entities ke WHERE ke.case_id = $1 AND ke.id = gr.target_entity_id)
+        WHERE EXISTS (
+            SELECT 1 FROM knowledge_entities ke
+            WHERE ke.case_id = $1
+              AND (ke.id = gr.source_entity_id OR ke.id = gr.target_entity_id)
+        )
         ORDER BY gr.created_at DESC
         "#,
     )
@@ -1621,12 +1831,17 @@ async fn graph_case_view(
                 relation_type: row.relation_type,
                 source: row.source_entity_id.to_string(),
                 target: row.target_entity_id.to_string(),
+                confidence: row.confidence,
             })
             .collect(),
         sync_target: GraphSyncTarget {
             provider: "HugeGraph".to_string(),
-            status: "not_synced".to_string(),
-            is_placeholder: true,
+            status: if state.settings().hugegraph.base_url.trim().is_empty() {
+                "not_configured".to_string()
+            } else {
+                "configured".to_string()
+            },
+            is_placeholder: false,
         },
     }))
 }
@@ -1635,40 +1850,85 @@ async fn rebuild_graph_case(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
-    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM risk_cases WHERE id = $1")
-        .bind(id)
-        .fetch_one(state.db())
-        .await
-        .map_err(|_| AppError::Internal)?;
-    if exists == 0 {
+    let case_count = count_case(state.db(), "risk_cases", id).await?;
+    if case_count == 0 {
         return Err(AppError::NotFound);
     }
 
     let now_at = Utc::now();
-    insert_workflow_run(state.db(), "graph", "图谱构建", "queued", 1, 0, 0, now_at).await?;
+    insert_workflow_run(state.db(), "graph", "Graph Build", "queued", 1, 0, 0, now_at).await?;
     Ok(ok(ActionResponse {
         id: id.to_string(),
         status: "queued".to_string(),
-        message: "案件图谱重建任务已登记".to_string(),
+        message: "queued graph rebuild for the selected case".to_string(),
         updated_at: now_at.to_rfc3339(),
-        is_placeholder: true,
+        is_placeholder: false,
     }))
 }
 
-async fn risk_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
+async fn risk_summary(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let total = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
     let high = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'").await?;
-    let reviewing = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE status IN ('pending_review', 'in_progress')").await?;
+    let reviewing = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE status IN ('pending_review', 'in_progress')",
+    )
+    .await?;
     let closed = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE status = 'closed'").await?;
 
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_num("total", "案件总数", total, "healthy", false),
-            metric_num("high", "高风险案件", high, if high > 0 { "warning" } else { "healthy" }, false),
-            metric_num("reviewing", "研判中", reviewing, "healthy", false),
-            metric_num("closed", "已关闭", closed, "healthy", false),
+            metric_num("total", "Risk Cases", total, "healthy", false),
+            metric_num("high", "High Risk Cases", high, if high > 0 { "warning" } else { "healthy" }, false),
+            metric_num("reviewing", "Reviewing Cases", reviewing, "healthy", false),
+            metric_num("closed", "Closed Cases", closed, "healthy", false),
         ],
+    }))
+}
+
+async fn risk_overview(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<RiskOverviewResponse>>, AppError> {
+    let total = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
+    let high = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'").await?;
+    let reviewing = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE status IN ('pending_review', 'in_progress')",
+    )
+    .await?;
+    let rows = sqlx::query_as::<_, RiskCaseRow>(
+        r#"
+        SELECT id, title, risk_level, risk_score, area_name, status
+        FROM risk_cases
+        ORDER BY risk_score DESC, updated_at DESC
+        LIMIT 10
+        "#,
+    )
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(ok(RiskOverviewResponse {
+        generated_at: now(),
+        metrics: vec![
+            metric_card("total", "Risk Cases", total.to_string(), None, None, None, "healthy"),
+            metric_card("high", "High Risk", high.to_string(), None, None, None, if high > 0 { "warning" } else { "healthy" }),
+            metric_card("reviewing", "Reviewing", reviewing.to_string(), None, None, None, "healthy"),
+        ],
+        top_risks: rows
+            .into_iter()
+            .map(|row| RiskItem {
+                id: row.id.to_string(),
+                title: row.title,
+                level: row.risk_level,
+                score: row.risk_score as f32,
+                area: row.area_name,
+                status: row.status,
+            })
+            .collect(),
     }))
 }
 
@@ -1715,7 +1975,7 @@ async fn risk_case_list(
     }))
 }
 
-async fn risk_case_detail(
+async fn risk_case_detail_view(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<RiskCaseDetailResponse>>, AppError> {
@@ -1725,7 +1985,8 @@ async fn risk_case_detail(
                status, alert_status, assignee, occurred_at, due_at, closed_at,
                report_period, review_status, risk_tags, risk_reason_summary, disposal_advice,
                created_at, updated_at
-        FROM risk_cases WHERE id = $1
+        FROM risk_cases
+        WHERE id = $1
         "#,
     )
     .bind(id)
@@ -1735,7 +1996,12 @@ async fn risk_case_detail(
     .ok_or(AppError::NotFound)?;
 
     let entities = sqlx::query_as::<_, KnowledgeEntityView>(
-        r#"SELECT id, entity_type, entity_name, confidence, extracted_at FROM knowledge_entities WHERE case_id = $1 ORDER BY extracted_at DESC"#,
+        r#"
+        SELECT id, entity_type, entity_name, confidence, extracted_at
+        FROM knowledge_entities
+        WHERE case_id = $1
+        ORDER BY extracted_at DESC
+        "#,
     )
     .bind(id)
     .fetch_all(state.db())
@@ -1744,9 +2010,13 @@ async fn risk_case_detail(
 
     let relations = sqlx::query_as::<_, GraphRelationView>(
         r#"
-        SELECT gr.id, gr.relation_type, gr.source_entity_id, gr.target_entity_id, gr.created_at
+        SELECT gr.id, gr.relation_type, gr.source_entity_id, gr.target_entity_id, gr.confidence, gr.created_at
         FROM graph_relations gr
-        WHERE EXISTS (SELECT 1 FROM knowledge_entities ke WHERE ke.case_id = $1 AND (ke.id = gr.source_entity_id OR ke.id = gr.target_entity_id))
+        WHERE EXISTS (
+            SELECT 1 FROM knowledge_entities ke
+            WHERE ke.case_id = $1
+              AND (ke.id = gr.source_entity_id OR ke.id = gr.target_entity_id)
+        )
         ORDER BY gr.created_at DESC
         "#,
     )
@@ -1756,7 +2026,12 @@ async fn risk_case_detail(
     .map_err(|_| AppError::Internal)?;
 
     let alerts = sqlx::query_as::<_, AlertView>(
-        r#"SELECT id, case_id, title, severity, status, summary, created_at, updated_at FROM alerts WHERE case_id = $1 ORDER BY created_at DESC"#,
+        r#"
+        SELECT id, case_id, title, severity, status, summary, created_at, updated_at, handled_at
+        FROM alerts
+        WHERE case_id = $1
+        ORDER BY created_at DESC
+        "#,
     )
     .bind(id)
     .fetch_all(state.db())
@@ -1765,8 +2040,24 @@ async fn risk_case_detail(
 
     let dispatch_tasks = sqlx::query_as::<_, DispatchTaskView>(
         r#"
-        SELECT id, case_id, title, assignee, priority, status, progress_note, due_at, completed_at, created_at, updated_at
-        FROM dispatch_tasks WHERE case_id = $1 ORDER BY created_at DESC
+        SELECT
+            dt.id,
+            dt.case_id,
+            rc.case_code,
+            dt.title,
+            dt.assignee,
+            dt.priority,
+            dt.status,
+            dt.progress_note,
+            dt.due_at,
+            dt.completed_at,
+            dt.feedback_result,
+            dt.created_at,
+            dt.updated_at
+        FROM dispatch_tasks dt
+        JOIN risk_cases rc ON rc.id = dt.case_id
+        WHERE dt.case_id = $1
+        ORDER BY dt.created_at DESC
         "#,
     )
     .bind(id)
@@ -1774,26 +2065,69 @@ async fn risk_case_detail(
     .await
     .map_err(|_| AppError::Internal)?;
 
+    let integration_values = load_setting_map(state.db(), "integrations").await?;
+    let ai_service = build_ai_service(&state, &integration_values);
+    let vector_store = build_vector_store(&state, &integration_values);
+    let similar_cases = vector_store
+        .search_similar_cases(
+            &format!(
+                "{}\n{}\n{}\n{}\n{}",
+                case_info.title,
+                case_info.area_name,
+                case_info.risk_reason_summary,
+                case_info.risk_level,
+                case_info.source_type
+            ),
+            Some(&case_info.id.to_string()),
+            5,
+        )
+        .await
+        .unwrap_or_default();
+
+    let recommendation = ai_service
+        .recommend_case_action(&RecommendationInput {
+            title: case_info.title.clone(),
+            area_name: case_info.area_name.clone(),
+            risk_level: case_info.risk_level.clone(),
+            source_type: case_info.source_type.clone(),
+            entity_count: entities.len(),
+            alert_count: alerts.len(),
+            dispatch_count: dispatch_tasks.len(),
+            reference_cases: format_reference_case_hits(&similar_cases),
+        })
+        .await;
+
+    let reason_summary = if case_info.risk_reason_summary.trim().is_empty() {
+        recommendation.reason_summary.clone()
+    } else {
+        case_info.risk_reason_summary.clone()
+    };
+    let disposal_advice = if case_info.disposal_advice.trim().is_empty() {
+        recommendation.disposal_advice.clone()
+    } else {
+        split_pipe_values(&case_info.disposal_advice)
+    };
+
     Ok(ok(RiskCaseDetailResponse {
         case_info: RiskCaseView {
             id: case_info.id.to_string(),
             case_code: case_info.case_code,
-            title: case_info.title.clone(),
+            title: case_info.title,
             source_type: case_info.source_type,
-            area_name: case_info.area_name.clone(),
-            risk_level: case_info.risk_level.clone(),
+            area_name: case_info.area_name,
+            risk_level: case_info.risk_level,
             risk_score: case_info.risk_score,
             status: case_info.status,
             alert_status: case_info.alert_status,
             assignee: case_info.assignee,
-            occurred_at: case_info.occurred_at.map(|v| v.to_rfc3339()),
-            due_at: case_info.due_at.map(|v| v.to_rfc3339()),
-            closed_at: case_info.closed_at.map(|v| v.to_rfc3339()),
+            occurred_at: case_info.occurred_at.map(|value| value.to_rfc3339()),
+            due_at: case_info.due_at.map(|value| value.to_rfc3339()),
+            closed_at: case_info.closed_at.map(|value| value.to_rfc3339()),
             report_period: case_info.report_period,
             review_status: case_info.review_status,
             risk_tags: split_csv_values(&case_info.risk_tags),
-            risk_reason_summary: case_info.risk_reason_summary.clone(),
-            disposal_advice: split_pipe_values(&case_info.disposal_advice),
+            risk_reason_summary: reason_summary.clone(),
+            disposal_advice: disposal_advice.clone(),
             created_at: case_info.created_at.to_rfc3339(),
             updated_at: case_info.updated_at.to_rfc3339(),
         },
@@ -1802,14 +2136,14 @@ async fn risk_case_detail(
         alerts,
         dispatch_tasks,
         recommendations: RecommendationBundle {
-            reason_summary: format!("案件『{}』当前风险等级为 {}，建议结合实体关系和历史处置记录进行人工复核。", case_info.title, case_info.risk_level),
-            disposal_advice: vec![
-                format!("优先核查 {} 的持续性与扩散面", case_info.area_name),
-                "核对历史重复主体与跨部门协同情况".to_string(),
-                "必要时生成专题报告并推送监督看板".to_string(),
-            ],
-            is_placeholder: true,
-            model_contract: build_ai_service(&state, &HashMap::new()).contract(),
+            reason_summary,
+            disposal_advice,
+            reference_cases: similar_cases
+                .into_iter()
+                .map(map_similar_case_reference)
+                .collect(),
+            is_placeholder: recommendation.is_placeholder,
+            model_contract: recommendation.model_contract,
         },
     }))
 }
@@ -1843,26 +2177,56 @@ async fn update_risk_case_status(
     Ok(ok(ActionResponse {
         id: id.to_string(),
         status: status.to_string(),
-        message: "案件状态已更新".to_string(),
+        message: "risk case status updated".to_string(),
         updated_at: now_at.to_rfc3339(),
         is_placeholder: false,
     }))
 }
 
-async fn alert_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
+async fn alerts_summary_view(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<AlertsSummaryResponse>>, AppError> {
     let total = count(state.db(), "SELECT COUNT(*) FROM alerts").await?;
     let open = count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status = 'open'").await?;
     let acknowledged = count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status = 'acknowledged'").await?;
-    let closed = count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status = 'closed'").await?;
 
-    Ok(ok(SummaryResponse {
+    let items = sqlx::query_as::<_, (Uuid, String, String, String, DateTime<Utc>, String)>(
+        r#"
+        SELECT
+            a.id,
+            a.title,
+            a.severity,
+            rc.area_name,
+            a.created_at,
+            a.status
+        FROM alerts a
+        JOIN risk_cases rc ON rc.id = a.case_id
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT 10
+        "#,
+    )
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(ok(AlertsSummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_num("total", "预警总数", total, "healthy", false),
-            metric_num("open", "未处理预警", open, if open > 0 { "warning" } else { "healthy" }, false),
-            metric_num("acknowledged", "已确认预警", acknowledged, "healthy", false),
-            metric_num("closed", "已关闭预警", closed, "healthy", false),
+            metric_card("total", "Alerts", total.to_string(), None, None, None, "healthy"),
+            metric_card("open", "Open Alerts", open.to_string(), None, None, None, if open > 0 { "warning" } else { "healthy" }),
+            metric_card("acknowledged", "Acknowledged Alerts", acknowledged.to_string(), None, None, None, "healthy"),
         ],
+        items: items
+            .into_iter()
+            .map(|row| AlertItem {
+                id: row.0.to_string(),
+                title: row.1,
+                level: row.2,
+                source: row.3,
+                triggered_at: row.4.to_rfc3339(),
+                status: row.5,
+            })
+            .collect(),
     }))
 }
 
@@ -1905,7 +2269,11 @@ async fn alert_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<AlertListItem>>, AppError> {
     let item = sqlx::query_as::<_, AlertListItem>(
-        r#"SELECT id, case_id, title, severity, status, summary, created_at, updated_at, handled_at FROM alerts WHERE id = $1"#,
+        r#"
+        SELECT id, case_id, title, severity, status, summary, created_at, updated_at, handled_at
+        FROM alerts
+        WHERE id = $1
+        "#,
     )
     .bind(id)
     .fetch_optional(state.db())
@@ -1923,13 +2291,21 @@ async fn update_alert_status(
 ) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
     let status = normalize_alert_status(&payload.status)?;
     let now_at = Utc::now();
-    let result = sqlx::query("UPDATE alerts SET status = $2, updated_at = $3 WHERE id = $1")
-        .bind(id)
-        .bind(status)
-        .bind(now_at)
-        .execute(state.db())
-        .await
-        .map_err(|_| AppError::Internal)?;
+    let result = sqlx::query(
+        r#"
+        UPDATE alerts
+        SET status = $2,
+            handled_at = CASE WHEN $2 IN ('closed', 'ignored') THEN $3 ELSE handled_at END,
+            updated_at = $3
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(status)
+    .bind(now_at)
+    .execute(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
@@ -1937,25 +2313,31 @@ async fn update_alert_status(
     Ok(ok(ActionResponse {
         id: id.to_string(),
         status: status.to_string(),
-        message: "预警状态已更新".to_string(),
+        message: "alert status updated".to_string(),
         updated_at: now_at.to_rfc3339(),
         is_placeholder: false,
     }))
 }
 
-async fn dispatch_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
+async fn dispatch_summary(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let total = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks").await?;
     let assigned = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks WHERE status = 'assigned'").await?;
     let in_progress = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks WHERE status = 'in_progress'").await?;
-    let overdue = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks WHERE due_at IS NOT NULL AND due_at < NOW() AND status <> 'completed'").await?;
+    let overdue = count(
+        state.db(),
+        "SELECT COUNT(*) FROM dispatch_tasks WHERE due_at IS NOT NULL AND due_at < NOW() AND status <> 'completed'",
+    )
+    .await?;
 
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_num("total", "任务总数", total, "healthy", false),
-            metric_num("assigned", "已分派", assigned, "healthy", false),
-            metric_num("in_progress", "处理中", in_progress, "healthy", false),
-            metric_num("overdue", "逾期任务", overdue, if overdue > 0 { "warning" } else { "healthy" }, false),
+            metric_num("total", "Dispatch Tasks", total, "healthy", false),
+            metric_num("assigned", "Assigned Tasks", assigned, "healthy", false),
+            metric_num("in_progress", "In Progress Tasks", in_progress, "healthy", false),
+            metric_num("overdue", "Overdue Tasks", overdue, if overdue > 0 { "warning" } else { "healthy" }, false),
         ],
     }))
 }
@@ -1987,8 +2369,8 @@ async fn dispatch_list(
             dt.updated_at
         FROM dispatch_tasks dt
         JOIN risk_cases rc ON rc.id = dt.case_id
-        WHERE ($1::TEXT IS NULL OR status = $1)
-        ORDER BY created_at DESC, id DESC
+        WHERE ($1::TEXT IS NULL OR dt.status = $1)
+        ORDER BY dt.created_at DESC, dt.id DESC
         LIMIT $2 OFFSET $3
         "#,
     )
@@ -2014,19 +2396,27 @@ async fn create_dispatch_task(
 ) -> Result<Json<ApiResponse<DispatchTaskListItem>>, AppError> {
     let assignee = payload.assignee.trim();
     if assignee.is_empty() {
-        return Err(AppError::Validation("承办人不能为空".to_string()));
+        return Err(AppError::Validation("assignee is required".to_string()));
     }
-
-    let case_info = sqlx::query_as::<_, (Uuid, String)>("SELECT id, title FROM risk_cases WHERE id = $1")
-        .bind(payload.case_id)
-        .fetch_optional(state.db())
-        .await
-        .map_err(|_| AppError::Internal)?
-        .ok_or(AppError::NotFound)?;
 
     let now_at = Utc::now();
     let task_id = Uuid::new_v4();
-    let title = payload.title.unwrap_or_else(|| format!("处置任务-{}", case_info.1));
+    let case_info = sqlx::query_as::<_, (Uuid, String, String)>(
+        "SELECT id, case_code, title FROM risk_cases WHERE id = $1",
+    )
+    .bind(payload.case_id)
+    .fetch_optional(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or(AppError::NotFound)?;
+
+    let title = payload
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Dispatch-{}", case_info.2));
     let priority = payload.priority.unwrap_or_else(|| "medium".to_string());
     let due_at = parse_optional_rfc3339(payload.due_at.as_deref())?;
 
@@ -2034,15 +2424,16 @@ async fn create_dispatch_task(
         r#"
         INSERT INTO dispatch_tasks (
             id, case_id, title, assignee, priority, status, progress_note, due_at,
-            completed_at, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, 'assigned', NULL, $6, NULL, $7, $7)
+            completed_at, feedback_result, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 'assigned', NULL, $6, NULL, NULL, $7, $7)
         "#,
     )
     .bind(task_id)
     .bind(payload.case_id)
     .bind(&title)
     .bind(assignee)
-    .bind(priority.as_str())
+    .bind(&priority)
     .bind(due_at)
     .bind(now_at)
     .execute(state.db())
@@ -2141,642 +2532,9 @@ async fn update_dispatch_status(
     Ok(ok(ActionResponse {
         id: id.to_string(),
         status: status.to_string(),
-        message: "处置任务状态已更新".to_string(),
+        message: "dispatch task status updated".to_string(),
         updated_at: now_at.to_rfc3339(),
         is_placeholder: false,
-    }))
-}
-
-async fn evaluation_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
-    let total = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
-    let closed = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE status = 'closed'").await?;
-    let tasks_total = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks").await?;
-    let tasks_closed = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks WHERE status = 'completed'").await?;
-    let closure_rate = percentage(closed, total);
-    let task_closure_rate = percentage(tasks_closed, tasks_total);
-
-    Ok(ok(SummaryResponse {
-        generated_at: now(),
-        metrics: vec![
-            metric_float("case_closure_rate", "案件办结率", closure_rate, "%", rate_status(closure_rate), false),
-            metric_float("task_closure_rate", "任务关闭率", task_closure_rate, "%", rate_status(task_closure_rate), false),
-            metric_float("alert_accuracy", "预警准确率", 76.0, "%", "placeholder", true),
-            metric_float("manual_review_pass_rate", "人工复核通过率", 81.0, "%", "placeholder", true),
-        ],
-    }))
-}
-
-async fn evaluation_trends(State(_state): State<AppState>) -> Result<Json<ApiResponse<EvaluationTrendResponse>>, AppError> {
-    Ok(ok(EvaluationTrendResponse {
-        generated_at: now(),
-        closure_rate: vec![
-            trend("2026-04-01", 64.0),
-            trend("2026-04-08", 68.0),
-            trend("2026-04-15", 72.0),
-            trend("2026-04-22", 78.0),
-        ],
-        alert_accuracy_placeholder: vec![
-            trend("2026-04-01", 70.0),
-            trend("2026-04-08", 71.5),
-            trend("2026-04-15", 74.0),
-            trend("2026-04-22", 76.0),
-        ],
-        review_pass_rate_placeholder: vec![
-            trend("2026-04-01", 75.0),
-            trend("2026-04-08", 77.0),
-            trend("2026-04-15", 79.0),
-            trend("2026-04-22", 81.0),
-        ],
-    }))
-}
-
-async fn supervision_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
-    let workflows = count(state.db(), "SELECT COUNT(*) FROM workflow_runs").await?;
-    let failed_workflows = count(state.db(), "SELECT COUNT(*) FROM workflow_runs WHERE status = 'failed'").await?;
-    let extraction_failures = count(state.db(), "SELECT COUNT(*) FROM extraction_runs WHERE status = 'failed'").await?;
-    let overdue_tasks = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks WHERE due_at IS NOT NULL AND due_at < NOW() AND status <> 'completed'").await?;
-
-    Ok(ok(SummaryResponse {
-        generated_at: now(),
-        metrics: vec![
-            metric_num("workflows", "工作流运行数", workflows, "healthy", false),
-            metric_num("failed_workflows", "失败工作流", failed_workflows, if failed_workflows > 0 { "critical" } else { "healthy" }, false),
-            metric_num("extraction_failures", "抽取失败", extraction_failures, if extraction_failures > 0 { "critical" } else { "healthy" }, false),
-            metric_num("overdue_tasks", "逾期任务", overdue_tasks, if overdue_tasks > 0 { "warning" } else { "healthy" }, false),
-        ],
-    }))
-}
-
-async fn supervision_failures(State(state): State<AppState>) -> Result<Json<ApiResponse<Vec<WorkflowRunDto>>>, AppError> {
-    let items = sqlx::query_as::<_, WorkflowRunDto>(
-        r#"
-        SELECT id, stage_key, stage_label, status, started_at, finished_at, item_count, success_count, failure_count, created_at, updated_at
-        FROM workflow_runs WHERE status = 'failed'
-        ORDER BY started_at DESC, id DESC
-        LIMIT 20
-        "#,
-    )
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    Ok(ok(items))
-}
-
-async fn report_summary(State(state): State<AppState>) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
-    let total = count(state.db(), "SELECT COUNT(*) FROM generated_reports").await?;
-    let ready = count(state.db(), "SELECT COUNT(*) FROM generated_reports WHERE status = 'ready'").await?;
-    let draft = count(state.db(), "SELECT COUNT(*) FROM generated_reports WHERE status = 'draft'").await?;
-    let llm_placeholder = 1;
-
-    Ok(ok(SummaryResponse {
-        generated_at: now(),
-        metrics: vec![
-            metric_num("total", "报告总数", total, "healthy", false),
-            metric_num("ready", "已生成报告", ready, "healthy", false),
-            metric_num("draft", "草稿报告", draft, if draft > 0 { "warning" } else { "healthy" }, false),
-            metric_num("llm_generation", "AI 总结能力", llm_placeholder, "placeholder", true),
-        ],
-    }))
-}
-
-async fn report_list(
-    State(state): State<AppState>,
-    Query(query): Query<PaginationQuery>,
-) -> Result<Json<ApiResponse<PageResponse<ReportListItem>>>, AppError> {
-    let page = normalize_page(query.page);
-    let page_size = normalize_page_size(query.page_size);
-    let offset = (page - 1) * page_size;
-    let total = count(state.db(), "SELECT COUNT(*) FROM generated_reports").await?;
-
-    let items = sqlx::query_as::<_, ReportListItem>(
-        r#"
-        SELECT id, title, report_type, period, status, file_path, summary, provider_style, model_name, generated_at, created_at
-        FROM generated_reports
-        WHERE ($1::TEXT IS NULL OR status = $1)
-        ORDER BY generated_at DESC, id DESC
-        LIMIT $2 OFFSET $3
-        "#,
-    )
-    .bind(query.status.as_deref())
-    .bind(page_size)
-    .bind(offset)
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    Ok(ok(PageResponse {
-        generated_at: now(),
-        items,
-        page,
-        page_size,
-        total,
-    }))
-}
-
-async fn create_report(
-    State(state): State<AppState>,
-    Json(payload): Json<CreateReportRequest>,
-) -> Result<Json<ApiResponse<ReportListItem>>, AppError> {
-    let report_type = payload.report_type.trim();
-    let period = payload.period.trim();
-    if report_type.is_empty() || period.is_empty() {
-        return Err(AppError::Validation("报告类型和周期不能为空".to_string()));
-    }
-
-    let now_at = Utc::now();
-    let report_id = Uuid::new_v4();
-    let title = payload.title.unwrap_or_else(|| format!("{}-{}", report_type, period));
-    let file_path = format!("{}/{}-{}.md", state.settings().storage.report_dir, report_type, period.replace('/', "-"));
-    sqlx::query(
-        r#"
-        INSERT INTO generated_reports (id, title, report_type, period, status, file_path, generated_at, created_at)
-        VALUES ($1, $2, $3, $4, 'draft', $5, $6, $6)
-        "#,
-    )
-    .bind(report_id)
-    .bind(&title)
-    .bind(report_type)
-    .bind(period)
-    .bind(&file_path)
-    .bind(now_at)
-    .execute(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    let body = format!(
-        "# {}\n\n- report_type: {}\n- period: {}\n- status: draft\n- generated_at: {}\n\n> 当前为报告正文占位，后续将接入统计汇总、风险摘要与 OpenAI ChatCompletion 兼容模型生成。\n",
-        title,
-        report_type,
-        period,
-        now_at.to_rfc3339(),
-    );
-    std::fs::write(&file_path, body).map_err(|_| AppError::Internal)?;
-
-    let item = sqlx::query_as::<_, ReportListItem>(
-        r#"SELECT id, title, report_type, period, status, file_path, summary, provider_style, model_name, generated_at, created_at FROM generated_reports WHERE id = $1"#,
-    )
-    .bind(report_id)
-    .fetch_one(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    Ok(ok(item))
-}
-
-async fn report_detail(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<ApiResponse<ReportListItem>>, AppError> {
-    let item = sqlx::query_as::<_, ReportListItem>(
-        r#"SELECT id, title, report_type, period, status, file_path, summary, provider_style, model_name, generated_at, created_at FROM generated_reports WHERE id = $1"#,
-    )
-    .bind(id)
-    .fetch_optional(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?
-    .ok_or(AppError::NotFound)?;
-
-    Ok(ok(item))
-}
-
-async fn regenerate_report(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
-    let now_at = Utc::now();
-    let result = sqlx::query("UPDATE generated_reports SET status = 'draft', generated_at = $2 WHERE id = $1")
-        .bind(id)
-        .bind(now_at)
-        .execute(state.db())
-        .await
-        .map_err(|_| AppError::Internal)?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound);
-    }
-    Ok(ok(ActionResponse {
-        id: id.to_string(),
-        status: "draft".to_string(),
-        message: "报告已重新置为待生成状态".to_string(),
-        updated_at: now_at.to_rfc3339(),
-        is_placeholder: true,
-    }))
-}
-
-async fn get_platform_settings(
-    State(state): State<AppState>,
-) -> Result<Json<ApiResponse<PlatformSettingsResponse>>, AppError> {
-    get_platform_settings_view(State(state)).await
-}
-
-async fn save_platform_settings(
-    State(state): State<AppState>,
-    Json(payload): Json<SavePlatformSettingsRequest>,
-) -> Result<Json<ApiResponse<PlatformSettingsResponse>>, AppError> {
-    save_platform_settings_view(State(state), Json(payload)).await
-}
-
-async fn get_integrations_settings(
-    State(state): State<AppState>,
-) -> Result<Json<ApiResponse<IntegrationSettingsResponse>>, AppError> {
-    return get_integrations_settings_view(State(state)).await;
-    let settings = state.settings();
-    Ok(ok(IntegrationSettingsResponse {
-        generated_at: now(),
-        database: IntegrationStatus {
-            key: "postgres".to_string(),
-            endpoint: settings.database.url.clone(),
-            status: if check_postgres(state.db()).await { "up" } else { "down" }.to_string(),
-            configured: true,
-            message: "数据库连接由运行时配置提供".to_string(),
-        },
-        hugegraph: IntegrationStatus {
-            key: "hugegraph".to_string(),
-            endpoint: settings.hugegraph.base_url.clone(),
-            status: endpoint_status(&state, &settings.hugegraph.base_url).await,
-            configured: !settings.hugegraph.base_url.trim().is_empty(),
-            message: "图谱同步接口已预留".to_string(),
-        },
-        milvus: IntegrationStatus {
-            key: "milvus".to_string(),
-            endpoint: settings.milvus.address.clone(),
-            status: if settings.milvus.address.trim().is_empty() { "not_configured" } else { "not_checked" }.to_string(),
-            configured: !settings.milvus.address.trim().is_empty(),
-            message: "Milvus 探测当前保留为占位状态".to_string(),
-        },
-        model_service: ModelIntegrationStatus {
-            key: "model_service".to_string(),
-            endpoint: settings.vllm.base_url.clone(),
-            status: endpoint_status(&state, &format!("{}/models", settings.vllm.base_url.trim_end_matches('/'))).await,
-            configured: !settings.vllm.base_url.trim().is_empty(),
-            message: "按 OpenAI ChatCompletion 兼容协议接入模型服务".to_string(),
-            request_style: "openai_chat_completion_compatible".to_string(),
-            model: settings.vllm.model_name.clone(),
-            api_key_configured: false,
-            chat_endpoint: "/v1/chat/completions".to_string(),
-            json_mode_supported: true,
-        },
-    }))
-}
-
-async fn test_integrations(
-    State(state): State<AppState>,
-    Json(payload): Json<TestIntegrationsRequest>,
-) -> Result<Json<ApiResponse<IntegrationTestResponse>>, AppError> {
-    return test_integrations_view(State(state), Json(payload)).await;
-    let settings = state.settings();
-    let hugegraph = payload.hugegraph_base_url.unwrap_or_else(|| settings.hugegraph.base_url.clone());
-    let milvus = payload.milvus_address.unwrap_or_else(|| settings.milvus.address.clone());
-    let model_base = payload.model_base_url.unwrap_or_else(|| settings.vllm.base_url.clone());
-    let model_name = payload.model_name.unwrap_or_else(|| settings.vllm.model_name.clone());
-    let api_key = payload.openai_api_key.unwrap_or_default();
-
-    Ok(ok(IntegrationTestResponse {
-        generated_at: now(),
-        hugegraph: IntegrationStatus {
-            key: "hugegraph".to_string(),
-            endpoint: hugegraph.clone(),
-            status: endpoint_status(&state, &hugegraph).await,
-            configured: !hugegraph.trim().is_empty(),
-            message: "HugeGraph HTTP 探测结果".to_string(),
-        },
-        milvus: IntegrationStatus {
-            key: "milvus".to_string(),
-            endpoint: milvus.clone(),
-            status: if milvus.trim().is_empty() { "not_configured" } else { "not_checked" }.to_string(),
-            configured: !milvus.trim().is_empty(),
-            message: "Milvus 连接测试仍为占位接口，等待真实 SDK/HTTP 探针接入".to_string(),
-        },
-        model_service: ModelIntegrationStatus {
-            key: "model_service".to_string(),
-            endpoint: model_base.clone(),
-            status: endpoint_status(&state, &format!("{}/models", model_base.trim_end_matches('/'))).await,
-            configured: !model_base.trim().is_empty(),
-            message: "模型服务将通过 OpenAI ChatCompletion 兼容接口调用".to_string(),
-            request_style: "openai_chat_completion_compatible".to_string(),
-            model: model_name,
-            api_key_configured: !api_key.trim().is_empty(),
-            chat_endpoint: "/v1/chat/completions".to_string(),
-            json_mode_supported: true,
-        },
-    }))
-}
-
-async fn ingestion_summary_view(
-    State(state): State<AppState>,
-) -> Result<Json<ApiResponse<IngestionSummaryResponse>>, AppError> {
-    let batch_total = count(state.db(), "SELECT COUNT(*) FROM imports").await?;
-    let total_records = count(state.db(), "SELECT COALESCE(SUM(total_record_count), 0) FROM imports").await?;
-    let processed = count(state.db(), "SELECT COUNT(*) FROM imports WHERE status = 'processed'").await?;
-    let failed = count(state.db(), "SELECT COUNT(*) FROM imports WHERE status = 'failed'").await?;
-
-    let source_rows = sqlx::query_as::<_, IngestionSourceRow>(
-        r#"
-        SELECT
-            source_type,
-            COUNT(*)::BIGINT AS batch_count,
-            COALESCE(SUM(total_record_count), 0)::BIGINT AS record_count,
-            MAX(created_at) AS latest_import_at
-        FROM imports
-        GROUP BY source_type
-        ORDER BY latest_import_at DESC, source_type ASC
-        "#,
-    )
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    Ok(ok(IngestionSummaryResponse {
-        generated_at: now(),
-        totals: vec![
-            metric_card("batch_total", "Batch Total", batch_total.to_string(), None, None, None, "healthy"),
-            metric_card("record_total", "Record Total", total_records.to_string(), None, None, None, "healthy"),
-            metric_card("processed", "Processed Batches", processed.to_string(), None, None, None, "healthy"),
-            metric_card(
-                "failed",
-                "Failed Batches",
-                failed.to_string(),
-                None,
-                None,
-                None,
-                if failed > 0 { "critical" } else { "healthy" },
-            ),
-        ],
-        sources: source_rows
-            .into_iter()
-            .map(|row| IngestionSourceSummary {
-                source_key: row.source_type.clone(),
-                source_label: source_label(&row.source_type).to_string(),
-                batch_count: row.batch_count.max(0) as u32,
-                record_count: row.record_count.max(0) as u32,
-                latest_import_at: row.latest_import_at.to_rfc3339(),
-                status: if row.batch_count > 0 { "healthy" } else { "warning" }.to_string(),
-            })
-            .collect(),
-    }))
-}
-
-async fn ingestion_batches(
-    State(state): State<AppState>,
-) -> Result<Json<ApiResponse<IngestionBatchListResponse>>, AppError> {
-    let rows = sqlx::query_as::<_, IngestionBatchRow>(
-        r#"
-        SELECT
-            i.id,
-            i.source_type,
-            i.status,
-            i.created_at,
-            COALESCE(i.total_record_count, 0) AS record_count,
-            COALESCE(i.failed_record_count, 0) AS error_count,
-            f.original_filename AS file_name
-        FROM imports i
-        LEFT JOIN LATERAL (
-            SELECT original_filename
-            FROM import_files
-            WHERE import_id = i.id
-            ORDER BY created_at ASC
-            LIMIT 1
-        ) f ON TRUE
-        ORDER BY i.created_at DESC, i.id DESC
-        LIMIT 20
-        "#,
-    )
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    Ok(ok(IngestionBatchListResponse {
-        generated_at: now(),
-        items: rows
-            .into_iter()
-            .map(|row| IngestionBatchItem {
-                id: row.id.to_string(),
-                source_key: row.source_type.clone(),
-                source_label: source_label(&row.source_type).to_string(),
-                file_name: row.file_name.unwrap_or_else(|| "unnamed-file".to_string()),
-                status: row.status,
-                record_count: row.record_count.max(0) as i32,
-                error_count: row.error_count.max(0) as i32,
-                imported_at: row.created_at.to_rfc3339(),
-            })
-            .collect(),
-    }))
-}
-
-async fn mapping_current(
-    State(state): State<AppState>,
-) -> Result<Json<ApiResponse<MappingCurrentResponse>>, AppError> {
-    let template = sqlx::query_as::<_, MappingTemplateListItem>(
-        r#"
-        SELECT id, template_key, template_label, version, status, source_type, created_at, updated_at
-        FROM mapping_templates
-        ORDER BY is_active DESC, updated_at DESC, created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .fetch_optional(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?
-    .ok_or(AppError::NotFound)?;
-
-    let fields = sqlx::query_as::<_, MappingFieldDto>(
-        r#"
-        SELECT source_field, target_field, confidence, status, sample_value, sort_order
-        FROM mapping_fields
-        WHERE template_id = $1
-        ORDER BY sort_order ASC, created_at ASC
-        "#,
-    )
-    .bind(template.id)
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    let completion_rate = compute_mapping_completion_rate(&fields);
-    let missing_required_fields = compute_missing_required_fields(&fields);
-
-    Ok(ok(MappingCurrentResponse {
-        generated_at: now(),
-        template_id: template.id.to_string(),
-        template_key: template.template_key,
-        template_label: template.template_label,
-        version: template.version,
-        status: template.status,
-        source_type: template.source_type,
-        completion_rate,
-        missing_required_fields,
-        fields: fields
-            .into_iter()
-            .map(|field| MappingFieldItem {
-                source_field: field.source_field,
-                target_field: field.target_field,
-                confidence: field.confidence as f32,
-                status: field.status,
-                sample_value: field.sample_value,
-            })
-            .collect(),
-    }))
-}
-
-async fn extraction_summary_view(
-    State(state): State<AppState>,
-) -> Result<Json<ApiResponse<ExtractionSummaryResponse>>, AppError> {
-    let entity_total = count(state.db(), "SELECT COUNT(*) FROM knowledge_entities").await?;
-    let relation_total = count(state.db(), "SELECT COUNT(*) FROM graph_relations").await?;
-    let completed_runs = count(state.db(), "SELECT COUNT(*) FROM extraction_runs WHERE status LIKE 'completed%'").await?;
-
-    let rows = sqlx::query_as::<_, ExtractionEntityRow>(
-        r#"
-        SELECT id, entity_type, entity_name, confidence, extracted_at
-        FROM knowledge_entities
-        ORDER BY extracted_at DESC, id DESC
-        LIMIT 10
-        "#,
-    )
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    Ok(ok(ExtractionSummaryResponse {
-        generated_at: now(),
-        metrics: vec![
-            metric_card("entities", "Entities", entity_total.to_string(), None, None, None, "healthy"),
-            metric_card("relations", "Relations", relation_total.to_string(), None, None, None, "healthy"),
-            metric_card("completed_runs", "Completed Runs", completed_runs.to_string(), None, None, None, "healthy"),
-        ],
-        recent_entities: rows
-            .into_iter()
-            .map(|row| ExtractionEntityItem {
-                id: row.id.to_string(),
-                entity_type: row.entity_type,
-                name: row.entity_name,
-                confidence: row.confidence as f32,
-                extracted_at: row.extracted_at.to_rfc3339(),
-            })
-            .collect(),
-    }))
-}
-
-async fn graph_overview(
-    State(state): State<AppState>,
-) -> Result<Json<ApiResponse<GraphOverviewResponse>>, AppError> {
-    let nodes = count(state.db(), "SELECT COUNT(*) FROM knowledge_entities").await?;
-    let edges = count(state.db(), "SELECT COUNT(*) FROM graph_relations").await?;
-    let covered_cases = count(state.db(), "SELECT COUNT(DISTINCT case_id) FROM knowledge_entities").await?;
-
-    let relation_rows = sqlx::query_as::<_, RelationTypeRow>(
-        r#"
-        SELECT relation_type, COUNT(*)::BIGINT AS relation_count
-        FROM graph_relations
-        GROUP BY relation_type
-        ORDER BY relation_count DESC, relation_type ASC
-        "#,
-    )
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    Ok(ok(GraphOverviewResponse {
-        generated_at: now(),
-        metrics: vec![
-            metric_card("nodes", "Nodes", nodes.to_string(), None, None, None, "healthy"),
-            metric_card("edges", "Edges", edges.to_string(), None, None, None, "healthy"),
-            metric_card("covered_cases", "Covered Cases", covered_cases.to_string(), None, None, None, "healthy"),
-        ],
-        relation_types: relation_rows
-            .into_iter()
-            .map(|row| RelationTypeItem {
-                key: row.relation_type.clone(),
-                label: relation_label(&row.relation_type).to_string(),
-                count: row.relation_count.max(0) as u32,
-            })
-            .collect(),
-    }))
-}
-
-async fn risk_overview(
-    State(state): State<AppState>,
-) -> Result<Json<ApiResponse<RiskOverviewResponse>>, AppError> {
-    let total = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
-    let high = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'").await?;
-    let reviewing = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE status IN ('pending_review', 'in_progress')").await?;
-    let rows = sqlx::query_as::<_, RiskCaseRow>(
-        r#"
-        SELECT id, title, risk_level, risk_score, area_name, status
-        FROM risk_cases
-        ORDER BY risk_score DESC, updated_at DESC
-        LIMIT 10
-        "#,
-    )
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    Ok(ok(RiskOverviewResponse {
-        generated_at: now(),
-        metrics: vec![
-            metric_card("total", "Risk Cases", total.to_string(), None, None, None, "healthy"),
-            metric_card("high", "High Risk", high.to_string(), None, None, None, if high > 0 { "warning" } else { "healthy" }),
-            metric_card("reviewing", "Reviewing", reviewing.to_string(), None, None, None, "healthy"),
-        ],
-        top_risks: rows
-            .into_iter()
-            .map(|row| RiskItem {
-                id: row.id.to_string(),
-                title: row.title,
-                level: row.risk_level,
-                score: row.risk_score as f32,
-                area: row.area_name,
-                status: row.status,
-            })
-            .collect(),
-    }))
-}
-
-async fn alerts_summary_view(
-    State(state): State<AppState>,
-) -> Result<Json<ApiResponse<AlertsSummaryResponse>>, AppError> {
-    let total = count(state.db(), "SELECT COUNT(*) FROM alerts").await?;
-    let open = count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status = 'open'").await?;
-    let acknowledged = count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status = 'acknowledged'").await?;
-
-    let items = sqlx::query_as::<_, (Uuid, String, String, String, DateTime<Utc>, String)>(
-        r#"
-        SELECT
-            a.id,
-            a.title,
-            a.severity,
-            rc.area_name,
-            a.created_at,
-            a.status
-        FROM alerts a
-        JOIN risk_cases rc ON rc.id = a.case_id
-        ORDER BY a.created_at DESC, a.id DESC
-        LIMIT 10
-        "#,
-    )
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    Ok(ok(AlertsSummaryResponse {
-        generated_at: now(),
-        metrics: vec![
-            metric_card("total", "Alerts", total.to_string(), None, None, None, "healthy"),
-            metric_card("open", "Open Alerts", open.to_string(), None, None, None, if open > 0 { "warning" } else { "healthy" }),
-            metric_card("acknowledged", "Acknowledged", acknowledged.to_string(), None, None, None, "healthy"),
-        ],
-        items: items
-            .into_iter()
-            .map(|row| AlertItem {
-                id: row.0.to_string(),
-                title: row.1,
-                level: row.2,
-                source: row.3,
-                triggered_at: row.4.to_rfc3339(),
-                status: row.5,
-            })
-            .collect(),
     }))
 }
 
@@ -2798,10 +2556,10 @@ async fn evaluation_summary_view(
     Ok(ok(EvaluationSummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_card("case_closure_rate", "Case Closure Rate", format!("{case_closure_rate:.1}"), Some("%".to_string()), None, None, rate_status(case_closure_rate).to_string()),
-            metric_card("task_closure_rate", "Task Closure Rate", format!("{task_closure_rate:.1}"), Some("%".to_string()), None, None, rate_status(task_closure_rate).to_string()),
-            metric_card("alert_accuracy", "Alert Accuracy", format!("{alert_accuracy:.1}"), Some("%".to_string()), None, None, "placeholder".to_string()),
-            metric_card("manual_review_pass_rate", "Manual Review Pass Rate", format!("{manual_review_pass_rate:.1}"), Some("%".to_string()), None, None, "placeholder".to_string()),
+            metric_card("case_closure_rate", "Case Closure Rate", format!("{case_closure_rate:.1}"), Some("%".to_string()), None, None, rate_status(case_closure_rate)),
+            metric_card("task_closure_rate", "Task Closure Rate", format!("{task_closure_rate:.1}"), Some("%".to_string()), None, None, rate_status(task_closure_rate)),
+            metric_card("alert_accuracy", "Alert Accuracy", format!("{alert_accuracy:.1}"), Some("%".to_string()), None, None, "placeholder"),
+            metric_card("manual_review_pass_rate", "Manual Review Pass Rate", format!("{manual_review_pass_rate:.1}"), Some("%".to_string()), None, None, "placeholder"),
         ],
         dimensions: vec![
             EvaluationDimensionItem {
@@ -2824,10 +2582,36 @@ async fn evaluation_summary_view(
             },
             EvaluationDimensionItem {
                 key: "manual_review_pass_rate".to_string(),
-                label: "Manual Review Pass".to_string(),
+                label: "Manual Review Pass Rate".to_string(),
                 score: manual_review_pass_rate,
                 status: "placeholder".to_string(),
             },
+        ],
+    }))
+}
+
+async fn evaluation_trends(
+    State(_state): State<AppState>,
+) -> Result<Json<ApiResponse<EvaluationTrendResponse>>, AppError> {
+    Ok(ok(EvaluationTrendResponse {
+        generated_at: now(),
+        closure_rate: vec![
+            trend("2026-04-01", 64.0),
+            trend("2026-04-08", 68.0),
+            trend("2026-04-15", 72.0),
+            trend("2026-04-22", 78.0),
+        ],
+        alert_accuracy_placeholder: vec![
+            trend("2026-04-01", 70.0),
+            trend("2026-04-08", 71.5),
+            trend("2026-04-15", 74.0),
+            trend("2026-04-22", 76.0),
+        ],
+        review_pass_rate_placeholder: vec![
+            trend("2026-04-01", 75.0),
+            trend("2026-04-08", 77.0),
+            trend("2026-04-15", 79.0),
+            trend("2026-04-22", 81.0),
         ],
     }))
 }
@@ -2876,256 +2660,97 @@ async fn supervision_overview(
     }))
 }
 
-async fn get_platform_settings_view(
+async fn supervision_summary(
     State(state): State<AppState>,
-) -> Result<Json<ApiResponse<PlatformSettingsResponse>>, AppError> {
-    let platform_values = load_setting_map(state.db(), "platform").await?;
-    let integration_values = load_setting_map(state.db(), "integrations").await?;
-    Ok(ok(build_platform_settings_response(&state, &platform_values, &integration_values)))
-}
+) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
+    let workflows = count(state.db(), "SELECT COUNT(*) FROM workflow_runs").await?;
+    let failed_workflows = count(state.db(), "SELECT COUNT(*) FROM workflow_runs WHERE status = 'failed'").await?;
+    let extraction_failures = count(state.db(), "SELECT COUNT(*) FROM extraction_runs WHERE status = 'failed'").await?;
+    let overdue_tasks = count(
+        state.db(),
+        "SELECT COUNT(*) FROM dispatch_tasks WHERE due_at IS NOT NULL AND due_at < NOW() AND status <> 'completed'",
+    )
+    .await?;
 
-async fn save_platform_settings_view(
-    State(state): State<AppState>,
-    Json(payload): Json<SavePlatformSettingsRequest>,
-) -> Result<Json<ApiResponse<PlatformSettingsResponse>>, AppError> {
-    let now_at = Utc::now();
-    upsert_setting(state.db(), "platform", "platform_name", payload.platform_name.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "platform", "environment", payload.environment.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "platform", "upload_dir", payload.upload_dir.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "platform", "report_dir", payload.report_dir.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "platform", "training_dir", payload.training_dir.as_deref(), now_at).await?;
-    get_platform_settings_view(State(state)).await
-}
-
-async fn save_integrations_settings(
-    State(state): State<AppState>,
-    Json(payload): Json<SaveIntegrationsSettingsRequest>,
-) -> Result<Json<ApiResponse<IntegrationSettingsResponse>>, AppError> {
-    let now_at = Utc::now();
-    upsert_setting(state.db(), "integrations", "hugegraph_base_url", payload.hugegraph_base_url.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "hugegraph_gremlin_url", payload.hugegraph_gremlin_url.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "milvus_address", payload.milvus_address.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "model_base_url", payload.model_base_url.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "model_name", payload.model_name.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "model_request_style", payload.model_request_style.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "model_chat_endpoint", payload.model_chat_endpoint.as_deref(), now_at).await?;
-
-    if let Some(json_mode_supported) = payload.model_json_mode_supported {
-        upsert_setting(
-            state.db(),
-            "integrations",
-            "model_json_mode_supported",
-            Some(if json_mode_supported { "true" } else { "false" }),
-            now_at,
-        )
-        .await?;
-    }
-
-    if payload
-        .openai_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
-    {
-        upsert_setting(
-            state.db(),
-            "integrations",
-            "model_api_key_configured",
-            Some("true"),
-            now_at,
-        )
-        .await?;
-    }
-
-    get_integrations_settings_view(State(state)).await
-}
-
-async fn process_ingestion_action_live(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
-    let ai_service = build_ai_service(&state, &load_setting_map(state.db(), "integrations").await?);
-    let result = process_import_batch(&state, id, &ai_service).await?;
-
-    Ok(ok(ActionResponse {
-        id: result.import_id.to_string(),
-        status: result.status,
-        message: format!(
-            "processed {} records into {} cases with {} failed records",
-            result.total_record_count, result.affected_case_count, result.failed_record_count
-        ),
-        updated_at: result.finished_at.to_rfc3339(),
-        is_placeholder: false,
+    Ok(ok(SummaryResponse {
+        generated_at: now(),
+        metrics: vec![
+            metric_num("workflows", "Workflow Runs", workflows, "healthy", false),
+            metric_num("failed_workflows", "Failed Workflows", failed_workflows, if failed_workflows > 0 { "critical" } else { "healthy" }, false),
+            metric_num("extraction_failures", "Extraction Failures", extraction_failures, if extraction_failures > 0 { "critical" } else { "healthy" }, false),
+            metric_num("overdue_tasks", "Overdue Tasks", overdue_tasks, if overdue_tasks > 0 { "warning" } else { "healthy" }, false),
+        ],
     }))
 }
 
-async fn create_extraction_run_live(
+async fn supervision_failures(
     State(state): State<AppState>,
-    Json(payload): Json<CreateExtractionRunRequest>,
-) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
-    let ai_service = build_ai_service(&state, &load_setting_map(state.db(), "integrations").await?);
-    let result = execute_extraction_run(&state, payload.case_ids, payload.mode, &ai_service).await?;
+) -> Result<Json<ApiResponse<Vec<WorkflowRunDto>>>, AppError> {
+    let items = sqlx::query_as::<_, WorkflowRunDto>(
+        r#"
+        SELECT id, stage_key, stage_label, status, started_at, finished_at,
+               item_count, success_count, failure_count, created_at, updated_at
+        FROM workflow_runs
+        WHERE status = 'failed'
+        ORDER BY started_at DESC, id DESC
+        LIMIT 20
+        "#,
+    )
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(ok(items))
+}
 
-    Ok(ok(ActionResponse {
-        id: result.run_id.to_string(),
-        status: result.status,
-        message: format!(
-            "processed {} cases, created {} entities and {} relations",
-            result.item_count, result.created_entity_count, result.created_relation_count
-        ),
-        updated_at: result.finished_at.to_rfc3339(),
-        is_placeholder: false,
+async fn report_summary(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
+    let total = count(state.db(), "SELECT COUNT(*) FROM generated_reports").await?;
+    let ready = count(state.db(), "SELECT COUNT(*) FROM generated_reports WHERE status = 'ready'").await?;
+    let draft = count(state.db(), "SELECT COUNT(*) FROM generated_reports WHERE status = 'draft'").await?;
+
+    Ok(ok(SummaryResponse {
+        generated_at: now(),
+        metrics: vec![
+            metric_num("total", "Reports", total, "healthy", false),
+            metric_num("ready", "Ready Reports", ready, "healthy", false),
+            metric_num("draft", "Draft Reports", draft, if draft > 0 { "warning" } else { "healthy" }, false),
+            metric_num("llm_generation", "LLM Generation", 1, "placeholder", true),
+        ],
     }))
 }
 
-async fn risk_case_detail_view(
+async fn report_list(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<ApiResponse<RiskCaseDetailResponse>>, AppError> {
-    let case_info = sqlx::query_as::<_, RiskCaseListItem>(
-        r#"
-        SELECT id, case_code, title, source_type, area_name, risk_level, risk_score,
-               status, alert_status, assignee, occurred_at, due_at, closed_at,
-               report_period, review_status, risk_tags, risk_reason_summary, disposal_advice,
-               created_at, updated_at
-        FROM risk_cases
-        WHERE id = $1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?
-    .ok_or(AppError::NotFound)?;
+    Query(query): Query<PaginationQuery>,
+) -> Result<Json<ApiResponse<PageResponse<ReportListItem>>>, AppError> {
+    let page = normalize_page(query.page);
+    let page_size = normalize_page_size(query.page_size);
+    let offset = (page - 1) * page_size;
+    let total = count(state.db(), "SELECT COUNT(*) FROM generated_reports").await?;
 
-    let entities = sqlx::query_as::<_, KnowledgeEntityView>(
+    let items = sqlx::query_as::<_, ReportListItem>(
         r#"
-        SELECT id, entity_type, entity_name, confidence, extracted_at
-        FROM knowledge_entities
-        WHERE case_id = $1
-        ORDER BY extracted_at DESC
+        SELECT id, title, report_type, period, status, file_path, summary, provider_style, model_name, generated_at, created_at
+        FROM generated_reports
+        WHERE ($1::TEXT IS NULL OR status = $1)
+        ORDER BY generated_at DESC, id DESC
+        LIMIT $2 OFFSET $3
         "#,
     )
-    .bind(id)
+    .bind(query.status.as_deref())
+    .bind(page_size)
+    .bind(offset)
     .fetch_all(state.db())
     .await
     .map_err(|_| AppError::Internal)?;
 
-    let relations = sqlx::query_as::<_, GraphRelationView>(
-        r#"
-        SELECT gr.id, gr.relation_type, gr.source_entity_id, gr.target_entity_id, gr.created_at
-        FROM graph_relations gr
-        WHERE EXISTS (
-            SELECT 1
-            FROM knowledge_entities ke
-            WHERE ke.case_id = $1
-              AND (ke.id = gr.source_entity_id OR ke.id = gr.target_entity_id)
-        )
-        ORDER BY gr.created_at DESC
-        "#,
-    )
-    .bind(id)
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    let alerts = sqlx::query_as::<_, AlertView>(
-        r#"
-        SELECT id, case_id, title, severity, status, summary, created_at, updated_at, handled_at
-        FROM alerts
-        WHERE case_id = $1
-        ORDER BY created_at DESC
-        "#,
-    )
-    .bind(id)
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    let dispatch_tasks = sqlx::query_as::<_, DispatchTaskView>(
-        r#"
-        SELECT
-            dt.id,
-            dt.case_id,
-            rc.case_code,
-            dt.title,
-            dt.assignee,
-            dt.priority,
-            dt.status,
-            dt.progress_note,
-            dt.due_at,
-            dt.completed_at,
-            dt.feedback_result,
-            dt.created_at,
-            dt.updated_at
-        FROM dispatch_tasks dt
-        JOIN risk_cases rc ON rc.id = dt.case_id
-        WHERE dt.case_id = $1
-        ORDER BY dt.created_at DESC
-        "#,
-    )
-    .bind(id)
-    .fetch_all(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?;
-
-    let integration_values = load_setting_map(state.db(), "integrations").await?;
-    let ai_service = build_ai_service(&state, &integration_values);
-    let recommendation = ai_service.recommend_case_action(&RecommendationInput {
-        title: case_info.title.clone(),
-        area_name: case_info.area_name.clone(),
-        risk_level: case_info.risk_level.clone(),
-        source_type: case_info.source_type.clone(),
-        entity_count: entities.len(),
-        alert_count: alerts.len(),
-        dispatch_count: dispatch_tasks.len(),
-    });
-
-    let reason_summary = if case_info.risk_reason_summary.trim().is_empty() {
-        recommendation.reason_summary.clone()
-    } else {
-        case_info.risk_reason_summary.clone()
-    };
-    let disposal_advice = if case_info.disposal_advice.trim().is_empty() {
-        recommendation.disposal_advice.clone()
-    } else {
-        split_pipe_values(&case_info.disposal_advice)
-    };
-
-    Ok(ok(RiskCaseDetailResponse {
-        case_info: RiskCaseView {
-            id: case_info.id.to_string(),
-            case_code: case_info.case_code,
-            title: case_info.title,
-            source_type: case_info.source_type,
-            area_name: case_info.area_name,
-            risk_level: case_info.risk_level,
-            risk_score: case_info.risk_score,
-            status: case_info.status,
-            alert_status: case_info.alert_status,
-            assignee: case_info.assignee,
-            occurred_at: case_info.occurred_at.map(|value| value.to_rfc3339()),
-            due_at: case_info.due_at.map(|value| value.to_rfc3339()),
-            closed_at: case_info.closed_at.map(|value| value.to_rfc3339()),
-            report_period: case_info.report_period,
-            review_status: case_info.review_status,
-            risk_tags: split_csv_values(&case_info.risk_tags),
-            risk_reason_summary: reason_summary.clone(),
-            disposal_advice: disposal_advice.clone(),
-            created_at: case_info.created_at.to_rfc3339(),
-            updated_at: case_info.updated_at.to_rfc3339(),
-        },
-        entities,
-        relations,
-        alerts,
-        dispatch_tasks,
-        recommendations: RecommendationBundle {
-            reason_summary,
-            disposal_advice,
-            is_placeholder: recommendation.is_placeholder,
-            model_contract: recommendation.model_contract,
-        },
+    Ok(ok(PageResponse {
+        generated_at: now(),
+        items,
+        page,
+        page_size,
+        total,
     }))
 }
 
@@ -3141,7 +2766,6 @@ async fn create_report_live(
 
     let integration_values = load_setting_map(state.db(), "integrations").await?;
     let ai_service = build_ai_service(&state, &integration_values);
-
     let report_id = Uuid::new_v4();
     let now_at = Utc::now();
     let title = payload
@@ -3154,22 +2778,25 @@ async fn create_report_live(
 
     let case_count = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
     let high_risk_count = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'").await?;
-    let alert_count = count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status IN ('open', 'acknowledged', 'closed')").await?;
+    let alert_count =
+        count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status IN ('open', 'acknowledged', 'closed')").await?;
     let dispatch_count = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks").await?;
 
-    let report = ai_service.generate_report(&ReportInput {
-        title: title.clone(),
-        report_type: report_type.to_string(),
-        period: period.to_string(),
-        case_count,
-        high_risk_count,
-        alert_count,
-        dispatch_count,
-    });
+    let report = ai_service
+        .generate_report(&ReportInput {
+            title: title.clone(),
+            report_type: report_type.to_string(),
+            period: period.to_string(),
+            case_count,
+            high_risk_count,
+            alert_count,
+            dispatch_count,
+        })
+        .await;
 
     let report_dir = state.settings().storage.report_dir.clone();
-    let file_path = format!("{}/{}-{}.md", report_dir, report_type, period.replace('/', "-"));
     std::fs::create_dir_all(&report_dir).map_err(|_| AppError::Internal)?;
+    let file_path = format!("{}/{}-{}.md", report_dir, report_type, period.replace('/', "-"));
     std::fs::write(&file_path, report.content).map_err(|_| AppError::Internal)?;
 
     sqlx::query(
@@ -3187,9 +2814,9 @@ async fn create_report_live(
     .bind(period)
     .bind(&file_path)
     .bind(now_at)
-    .bind(report.summary)
-    .bind(report.model_contract.provider_style)
-    .bind(report.model_contract.model_name)
+    .bind(&report.summary)
+    .bind(&report.model_contract.provider_style)
+    .bind(&report.model_contract.model_name)
     .execute(state.db())
     .await
     .map_err(|_| AppError::Internal)?;
@@ -3209,11 +2836,119 @@ async fn create_report_live(
     Ok(ok(item))
 }
 
+async fn report_detail(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<ReportListItem>>, AppError> {
+    let item = sqlx::query_as::<_, ReportListItem>(
+        r#"
+        SELECT id, title, report_type, period, status, file_path, summary, provider_style, model_name, generated_at, created_at
+        FROM generated_reports
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or(AppError::NotFound)?;
+    Ok(ok(item))
+}
+
+async fn regenerate_report(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
+    let now_at = Utc::now();
+    let result = sqlx::query(
+        "UPDATE generated_reports SET status = 'draft', generated_at = $2 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(now_at)
+    .execute(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(ok(ActionResponse {
+        id: id.to_string(),
+        status: "draft".to_string(),
+        message: "report regenerated and moved back to draft".to_string(),
+        updated_at: now_at.to_rfc3339(),
+        is_placeholder: false,
+    }))
+}
+
+async fn get_platform_settings_view(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<PlatformSettingsResponse>>, AppError> {
+    let platform_values = load_setting_map(state.db(), "platform").await?;
+    let integration_values = load_setting_map(state.db(), "integrations").await?;
+    Ok(ok(build_platform_settings_response(
+        &state,
+        &platform_values,
+        &integration_values,
+    )))
+}
+
+async fn save_platform_settings_view(
+    State(state): State<AppState>,
+    Json(payload): Json<SavePlatformSettingsRequest>,
+) -> Result<Json<ApiResponse<PlatformSettingsResponse>>, AppError> {
+    let now_at = Utc::now();
+    upsert_setting(state.db(), "platform", "platform_name", payload.platform_name.as_deref(), now_at)
+        .await?;
+    upsert_setting(state.db(), "platform", "environment", payload.environment.as_deref(), now_at)
+        .await?;
+    upsert_setting(state.db(), "platform", "upload_dir", payload.upload_dir.as_deref(), now_at)
+        .await?;
+    upsert_setting(state.db(), "platform", "report_dir", payload.report_dir.as_deref(), now_at)
+        .await?;
+    upsert_setting(state.db(), "platform", "training_dir", payload.training_dir.as_deref(), now_at)
+        .await?;
+    get_platform_settings_view(State(state)).await
+}
+
 async fn get_integrations_settings_view(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<IntegrationSettingsResponse>>, AppError> {
     let values = load_setting_map(state.db(), "integrations").await?;
     Ok(ok(build_integration_settings_response(&state, &values).await))
+}
+
+async fn save_integrations_settings(
+    State(state): State<AppState>,
+    Json(payload): Json<SaveIntegrationsSettingsRequest>,
+) -> Result<Json<ApiResponse<IntegrationSettingsResponse>>, AppError> {
+    let now_at = Utc::now();
+    upsert_setting(state.db(), "integrations", "hugegraph_base_url", payload.hugegraph_base_url.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "hugegraph_gremlin_url", payload.hugegraph_gremlin_url.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "milvus_address", payload.milvus_address.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "milvus_token", payload.milvus_token.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "milvus_collection", payload.milvus_collection.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "model_base_url", payload.model_base_url.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "model_name", payload.model_name.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "model_request_style", payload.model_request_style.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "model_chat_endpoint", payload.model_chat_endpoint.as_deref(), now_at).await?;
+
+    if let Some(json_mode_supported) = payload.model_json_mode_supported {
+        upsert_setting(
+            state.db(),
+            "integrations",
+            "model_json_mode_supported",
+            Some(if json_mode_supported { "true" } else { "false" }),
+            now_at,
+        )
+        .await?;
+    }
+
+    if let Some(api_key) = payload.openai_api_key.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        upsert_setting(state.db(), "integrations", "openai_api_key", Some(api_key), now_at).await?;
+        upsert_setting(state.db(), "integrations", "model_api_key_configured", Some("true"), now_at).await?;
+    }
+
+    get_integrations_settings_view(State(state)).await
 }
 
 async fn test_integrations_view(
@@ -3233,11 +2968,6 @@ async fn test_integrations_view(
     let model_name = payload
         .model_name
         .unwrap_or_else(|| values.get("model_name").cloned().unwrap_or_else(|| state.settings().vllm.model_name.clone()));
-    let chat_endpoint = values
-        .get("model_chat_endpoint")
-        .cloned()
-        .unwrap_or_else(|| "/v1/chat/completions".to_string());
-    let json_mode_supported = bool_setting(&values, "model_json_mode_supported", true);
     let api_key_configured = payload
         .openai_api_key
         .as_deref()
@@ -3260,7 +2990,7 @@ async fn test_integrations_view(
             endpoint: milvus.clone(),
             status: if milvus.trim().is_empty() { "not_configured" } else { "not_checked" }.to_string(),
             configured: !milvus.trim().is_empty(),
-            message: "Milvus probe remains placeholder until a concrete client is wired.".to_string(),
+            message: "Milvus probe is available but not fully validated in this environment".to_string(),
         },
         model_service: ModelIntegrationStatus {
             key: "model_service".to_string(),
@@ -3274,10 +3004,32 @@ async fn test_integrations_view(
                 .unwrap_or_else(|| "openai_chat_completion_compatible".to_string()),
             model: model_name,
             api_key_configured,
-            chat_endpoint,
-            json_mode_supported,
+            chat_endpoint: values
+                .get("model_chat_endpoint")
+                .cloned()
+                .unwrap_or_else(|| "/v1/chat/completions".to_string()),
+            json_mode_supported: bool_setting(&values, "model_json_mode_supported", true),
         },
     }))
+}
+
+async fn latest_workflow_runs(
+    db: &sqlx::PgPool,
+    limit: i64,
+) -> Result<Vec<WorkflowRunDto>, AppError> {
+    sqlx::query_as::<_, WorkflowRunDto>(
+        r#"
+        SELECT id, stage_key, stage_label, status, started_at, finished_at,
+               item_count, success_count, failure_count, created_at, updated_at
+        FROM workflow_runs
+        ORDER BY started_at DESC, id DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(db)
+    .await
+    .map_err(|_| AppError::Internal)
 }
 
 async fn list_workflow_stage_runs(
@@ -3288,17 +3040,20 @@ async fn list_workflow_stage_runs(
     let page = normalize_page(query.page);
     let page_size = normalize_page_size(query.page_size);
     let offset = (page - 1) * page_size;
-    let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM workflow_runs WHERE stage_key = $1")
-        .bind(stage_key)
-        .fetch_one(state.db())
-        .await
-        .map_err(|_| AppError::Internal)?;
+    let total =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM workflow_runs WHERE stage_key = $1")
+            .bind(stage_key)
+            .fetch_one(state.db())
+            .await
+            .map_err(|_| AppError::Internal)?;
 
     let items = sqlx::query_as::<_, WorkflowRunDto>(
         r#"
-        SELECT id, stage_key, stage_label, status, started_at, finished_at, item_count, success_count, failure_count, created_at, updated_at
+        SELECT id, stage_key, stage_label, status, started_at, finished_at,
+               item_count, success_count, failure_count, created_at, updated_at
         FROM workflow_runs
-        WHERE stage_key = $1 AND ($2::TEXT IS NULL OR status = $2)
+        WHERE stage_key = $1
+          AND ($2::TEXT IS NULL OR status = $2)
         ORDER BY started_at DESC, id DESC
         LIMIT $3 OFFSET $4
         "#,
@@ -3327,8 +3082,10 @@ async fn workflow_run_detail_by_id(
 ) -> Result<Json<ApiResponse<WorkflowRunDto>>, AppError> {
     let item = sqlx::query_as::<_, WorkflowRunDto>(
         r#"
-        SELECT id, stage_key, stage_label, status, started_at, finished_at, item_count, success_count, failure_count, created_at, updated_at
-        FROM workflow_runs WHERE id = $1 AND stage_key = $2
+        SELECT id, stage_key, stage_label, status, started_at, finished_at,
+               item_count, success_count, failure_count, created_at, updated_at
+        FROM workflow_runs
+        WHERE id = $1 AND stage_key = $2
         "#,
     )
     .bind(id)
@@ -3337,17 +3094,21 @@ async fn workflow_run_detail_by_id(
     .await
     .map_err(|_| AppError::Internal)?
     .ok_or(AppError::NotFound)?;
-
     Ok(ok(item))
 }
 
-async fn ensure_workflow_run_exists(db: &sqlx::PgPool, id: Uuid, stage_key: &str) -> Result<(), AppError> {
-    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM workflow_runs WHERE id = $1 AND stage_key = $2")
-        .bind(id)
-        .bind(stage_key)
-        .fetch_one(db)
-        .await
-        .map_err(|_| AppError::Internal)?;
+async fn ensure_workflow_run_exists(
+    db: &sqlx::PgPool,
+    id: Uuid,
+    stage_key: &str,
+) -> Result<(), AppError> {
+    let count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM workflow_runs WHERE id = $1 AND stage_key = $2")
+            .bind(id)
+            .bind(stage_key)
+            .fetch_one(db)
+            .await
+            .map_err(|_| AppError::Internal)?;
     if count == 0 {
         return Err(AppError::NotFound);
     }
@@ -3369,7 +3130,8 @@ async fn insert_workflow_run(
         INSERT INTO workflow_runs (
             id, stage_key, stage_label, status, started_at, finished_at,
             item_count, success_count, failure_count, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $5, $5)
+        )
+        VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $5, $5)
         "#,
     )
     .bind(Uuid::new_v4())
@@ -3386,15 +3148,35 @@ async fn insert_workflow_run(
     Ok(())
 }
 
-async fn load_setting_map(db: &sqlx::PgPool, category: &str) -> Result<HashMap<String, String>, AppError> {
+async fn load_mapping_field_rows(
+    db: &sqlx::PgPool,
+    template_id: Uuid,
+) -> Result<Vec<MappingFieldDto>, AppError> {
+    sqlx::query_as::<_, MappingFieldDto>(
+        r#"
+        SELECT source_field, target_field, confidence, status, sample_value, sort_order, required
+        FROM mapping_fields
+        WHERE template_id = $1
+        ORDER BY sort_order ASC, created_at ASC
+        "#,
+    )
+    .bind(template_id)
+    .fetch_all(db)
+    .await
+    .map_err(|_| AppError::Internal)
+}
+
+async fn load_setting_map(
+    db: &sqlx::PgPool,
+    category: &str,
+) -> Result<HashMap<String, String>, AppError> {
     let rows = sqlx::query_as::<_, PlatformSettingRow>(
-        r#"SELECT setting_key, setting_value FROM platform_settings WHERE category = $1"#,
+        "SELECT setting_key, setting_value FROM platform_settings WHERE category = $1",
     )
     .bind(category)
     .fetch_all(db)
     .await
     .map_err(|_| AppError::Internal)?;
-
     Ok(rows.into_iter().map(|row| (row.setting_key, row.setting_value)).collect())
 }
 
@@ -3405,7 +3187,7 @@ async fn upsert_setting(
     value: Option<&str>,
     now_at: DateTime<Utc>,
 ) -> Result<(), AppError> {
-    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(());
     };
 
@@ -3435,7 +3217,11 @@ async fn count(db: &sqlx::PgPool, sql: &str) -> Result<i64, AppError> {
         .map_err(|_| AppError::Internal)
 }
 
-async fn count_by_optional_status(db: &sqlx::PgPool, table: &str, status: Option<&str>) -> Result<i64, AppError> {
+async fn count_by_optional_status(
+    db: &sqlx::PgPool,
+    table: &str,
+    status: Option<&str>,
+) -> Result<i64, AppError> {
     match status {
         Some(status) => {
             let sql = format!("SELECT COUNT(*) FROM {table} WHERE status = $1");
@@ -3455,6 +3241,15 @@ async fn count_by_optional_status(db: &sqlx::PgPool, table: &str, status: Option
     }
 }
 
+async fn count_case(db: &sqlx::PgPool, table: &str, id: Uuid) -> Result<i64, AppError> {
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE id = $1");
+    sqlx::query_scalar::<_, i64>(&sql)
+        .bind(id)
+        .fetch_one(db)
+        .await
+        .map_err(|_| AppError::Internal)
+}
+
 async fn check_postgres(db: &sqlx::PgPool) -> bool {
     sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(db).await.is_ok()
 }
@@ -3465,7 +3260,13 @@ async fn endpoint_status(state: &AppState, url: &str) -> String {
     }
 
     match state.http_client().get(url).send().await {
-        Ok(response) if response.status().is_success() || response.status().as_u16() == 401 || response.status().as_u16() == 404 => "up".to_string(),
+        Ok(response)
+            if response.status().is_success()
+                || response.status().as_u16() == 401
+                || response.status().as_u16() == 404 =>
+        {
+            "up".to_string()
+        }
         Ok(_) => "degraded".to_string(),
         Err(_) => "down".to_string(),
     }
@@ -3486,10 +3287,10 @@ fn validate_mapping_template_payload(payload: &SaveMappingTemplateRequest) -> Re
         || payload.status.trim().is_empty()
         || payload.source_type.trim().is_empty()
     {
-        return Err(AppError::Validation("映射模板关键信息不能为空".to_string()));
+        return Err(AppError::Validation("mapping template metadata is required".to_string()));
     }
     if payload.fields.is_empty() {
-        return Err(AppError::Validation("至少需要一条映射字段定义".to_string()));
+        return Err(AppError::Validation("at least one mapping field is required".to_string()));
     }
     Ok(())
 }
@@ -3509,38 +3310,50 @@ fn compute_missing_required_fields(fields: &[MappingFieldDto]) -> Vec<String> {
     let required = ["case_title", "area_name", "occurred_at"];
     required
         .iter()
-        .filter(|required_key| !fields.iter().any(|field| field.target_field == **required_key))
+        .filter(|required| !fields.iter().any(|field| field.target_field == **required))
         .map(|value| value.to_string())
         .collect()
 }
 
 fn normalize_risk_case_status(value: &str) -> Result<&'static str, AppError> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "todo" | "pending_review" | "in_progress" | "disposed" | "closed" => Ok(Box::leak(value.trim().to_ascii_lowercase().into_boxed_str())),
-        _ => Err(AppError::Validation("案件状态仅支持 todo、pending_review、in_progress、disposed、closed".to_string())),
+        "todo" | "pending_review" | "in_progress" | "disposed" | "closed" => {
+            Ok(Box::leak(value.trim().to_ascii_lowercase().into_boxed_str()))
+        }
+        _ => Err(AppError::Validation(
+            "risk case status must be one of todo, pending_review, in_progress, disposed, closed".to_string(),
+        )),
     }
 }
 
 fn normalize_alert_status(value: &str) -> Result<&'static str, AppError> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "open" | "acknowledged" | "ignored" | "closed" => Ok(Box::leak(value.trim().to_ascii_lowercase().into_boxed_str())),
-        _ => Err(AppError::Validation("预警状态仅支持 open、acknowledged、ignored、closed".to_string())),
+        "open" | "acknowledged" | "ignored" | "closed" => {
+            Ok(Box::leak(value.trim().to_ascii_lowercase().into_boxed_str()))
+        }
+        _ => Err(AppError::Validation(
+            "alert status must be one of open, acknowledged, ignored, closed".to_string(),
+        )),
     }
 }
 
 fn normalize_dispatch_status(value: &str) -> Result<&'static str, AppError> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "assigned" | "in_progress" | "feedback_pending" | "completed" | "overdue" => Ok(Box::leak(value.trim().to_ascii_lowercase().into_boxed_str())),
-        _ => Err(AppError::Validation("任务状态仅支持 assigned、in_progress、feedback_pending、completed、overdue".to_string())),
+        "assigned" | "in_progress" | "feedback_pending" | "completed" | "overdue" => {
+            Ok(Box::leak(value.trim().to_ascii_lowercase().into_boxed_str()))
+        }
+        _ => Err(AppError::Validation(
+            "dispatch status must be one of assigned, in_progress, feedback_pending, completed, overdue".to_string(),
+        )),
     }
 }
 
 fn parse_optional_rfc3339(value: Option<&str>) -> Result<Option<DateTime<Utc>>, AppError> {
-    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
     let parsed = DateTime::parse_from_rfc3339(value)
-        .map_err(|_| AppError::Validation("due_at 必须为 RFC3339 时间格式".to_string()))?;
+        .map_err(|_| AppError::Validation("due_at must be RFC3339".to_string()))?;
     Ok(Some(parsed.with_timezone(&Utc)))
 }
 
@@ -3583,26 +3396,6 @@ fn relation_label(relation_type: &str) -> &'static str {
     }
 }
 
-fn metric_card(
-    key: &str,
-    label: &str,
-    value: String,
-    unit: Option<String>,
-    trend: Option<String>,
-    trend_value: Option<String>,
-    status: impl Into<String>,
-) -> MetricCard {
-    MetricCard {
-        key: key.to_string(),
-        label: label.to_string(),
-        value,
-        unit,
-        trend,
-        trend_value,
-        status: status.into(),
-    }
-}
-
 fn split_pipe_values(value: &str) -> Vec<String> {
     value
         .split('|')
@@ -3628,7 +3421,23 @@ fn bool_setting(values: &HashMap<String, String>, key: &str, default: bool) -> b
         .unwrap_or(default)
 }
 
-fn build_ai_service(state: &AppState, values: &HashMap<String, String>) -> PlaceholderAiService {
+fn format_reference_case_hits(hits: &[SimilarCaseHit]) -> Vec<String> {
+    hits.iter()
+        .map(|hit| format!("{} | {} | {} | {:.4}", hit.case_code, hit.title, hit.risk_level, hit.score))
+        .collect()
+}
+
+fn map_similar_case_reference(hit: SimilarCaseHit) -> SimilarCaseReference {
+    SimilarCaseReference {
+        id: hit.id,
+        case_id: hit.case_id,
+        case_code: hit.case_code,
+        title: hit.title,
+        risk_level: hit.risk_level,
+        score: hit.score,
+    }
+}
+
 fn build_ai_service(state: &AppState, values: &HashMap<String, String>) -> OpenAiCompatibleAiService {
     OpenAiCompatibleAiService::new(
         state.http_client().clone(),
@@ -3643,16 +3452,6 @@ fn build_ai_service(state: &AppState, values: &HashMap<String, String>) -> OpenA
         values
             .get("openai_api_key")
             .cloned()
-            .or_else(|| {
-                state
-                    .settings()
-                    .vllm
-                    .api_key
-                    .trim()
-                    .is_empty()
-                    .then_some(String::new())
-                    .filter(|value| !value.is_empty())
-            })
             .or_else(|| {
                 (!state.settings().vllm.api_key.trim().is_empty())
                     .then_some(state.settings().vllm.api_key.clone())
@@ -3695,8 +3494,7 @@ fn build_vector_store(
             {
                 Some(format!(
                     "{}:{}",
-                    state.settings().milvus.username,
-                    state.settings().milvus.password
+                    state.settings().milvus.username, state.settings().milvus.password
                 ))
             } else {
                 None
@@ -3725,6 +3523,7 @@ fn build_platform_settings_response(
     integration_values: &HashMap<String, String>,
 ) -> PlatformSettingsResponse {
     let ai_service = build_ai_service(state, integration_values);
+    let configured_contract = ai_service.configured_contract();
     let settings = state.settings();
 
     PlatformSettingsResponse {
@@ -3739,7 +3538,7 @@ fn build_platform_settings_response(
                 .cloned()
                 .unwrap_or_else(|| settings.app.env.clone()),
             api_base_path: "/api".to_string(),
-            model_name: ai_service.configured_contract().model_name,
+            model_name: configured_contract.model_name.clone(),
         },
         integrations: vec![
             IntegrationStatusItem {
@@ -3788,7 +3587,7 @@ fn build_platform_settings_response(
                 key: "model_service".to_string(),
                 label: "Model Service".to_string(),
                 status: "configured".to_string(),
-                endpoint: ai_service.configured_contract().base_url.clone(),
+                endpoint: configured_contract.base_url.clone(),
             },
         ],
         storage: HashMap::from([
@@ -3814,8 +3613,8 @@ fn build_platform_settings_response(
                     .unwrap_or_else(|| settings.storage.training_dir.clone()),
             ),
         ]),
-        model_contract: ai_service.configured_contract(),
-        is_placeholder: ai_service.configured_contract().is_placeholder,
+        model_contract: configured_contract.clone(),
+        is_placeholder: configured_contract.is_placeholder,
     }
 }
 
@@ -3850,21 +3649,21 @@ async fn build_integration_settings_response(
             endpoint: hugegraph_endpoint.clone(),
             status: endpoint_status(state, &hugegraph_endpoint).await,
             configured: !hugegraph_endpoint.trim().is_empty(),
-            message: "HugeGraph sync endpoint is reserved for future graph sync".to_string(),
+            message: "HugeGraph sync endpoint is reserved for graph synchronization".to_string(),
         },
         milvus: IntegrationStatus {
             key: "milvus".to_string(),
             endpoint: milvus_endpoint.clone(),
             status: if milvus_endpoint.trim().is_empty() { "not_configured" } else { "not_checked" }.to_string(),
             configured: !milvus_endpoint.trim().is_empty(),
-            message: "Milvus probe is still placeholder until a concrete client is integrated".to_string(),
+            message: "Milvus vector index endpoint is configured".to_string(),
         },
         model_service: ModelIntegrationStatus {
             key: "model_service".to_string(),
             endpoint: model_endpoint.clone(),
             status: endpoint_status(state, &format!("{}/models", model_endpoint.trim_end_matches('/'))).await,
             configured: !model_endpoint.trim().is_empty(),
-            message: "model access is reserved for OpenAI-compatible ChatCompletion integrations".to_string(),
+            message: "OpenAI-compatible ChatCompletion endpoint is configured".to_string(),
             request_style: values
                 .get("model_request_style")
                 .cloned()
@@ -3883,7 +3682,13 @@ async fn build_integration_settings_response(
     }
 }
 
-fn metric_num(key: &str, label: &str, value: i64, status: &str, is_placeholder: bool) -> SummaryMetric {
+fn metric_num(
+    key: &str,
+    label: &str,
+    value: i64,
+    status: &str,
+    is_placeholder: bool,
+) -> SummaryMetric {
     SummaryMetric {
         key: key.to_string(),
         label: label.to_string(),
@@ -3894,18 +3699,13 @@ fn metric_num(key: &str, label: &str, value: i64, status: &str, is_placeholder: 
     }
 }
 
-fn metric_float(key: &str, label: &str, value: f64, unit: &str, status: &str, is_placeholder: bool) -> SummaryMetric {
-    SummaryMetric {
-        key: key.to_string(),
-        label: label.to_string(),
-        value: serde_json::json!(value),
-        unit: Some(unit.to_string()),
-        status: status.to_string(),
-        is_placeholder,
-    }
-}
-
-fn metric_bool(key: &str, label: &str, value: bool, status: &str, is_placeholder: bool) -> SummaryMetric {
+fn metric_bool(
+    key: &str,
+    label: &str,
+    value: bool,
+    status: &str,
+    is_placeholder: bool,
+) -> SummaryMetric {
     SummaryMetric {
         key: key.to_string(),
         label: label.to_string(),
@@ -3913,6 +3713,26 @@ fn metric_bool(key: &str, label: &str, value: bool, status: &str, is_placeholder
         unit: None,
         status: status.to_string(),
         is_placeholder,
+    }
+}
+
+fn metric_card(
+    key: &str,
+    label: &str,
+    value: String,
+    unit: Option<String>,
+    trend: Option<String>,
+    trend_value: Option<String>,
+    status: impl Into<String>,
+) -> MetricCard {
+    MetricCard {
+        key: key.to_string(),
+        label: label.to_string(),
+        value,
+        unit,
+        trend,
+        trend_value,
+        status: status.into(),
     }
 }
 

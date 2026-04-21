@@ -478,6 +478,9 @@ pub async fn execute_extraction_run(
         let mut graph_entities = Vec::with_capacity(entities.len());
         for entity in entities {
             let entity_id = Uuid::new_v4();
+            let entity_type = entity.entity_type.clone();
+            let entity_name = entity.entity_name.clone();
+            let entity_confidence = entity.confidence;
             sqlx::query(
                 r#"
                 INSERT INTO knowledge_entities (
@@ -488,18 +491,18 @@ pub async fn execute_extraction_run(
             )
             .bind(entity_id)
             .bind(case.id)
-            .bind(entity.entity_type)
-            .bind(entity.entity_name)
-            .bind(entity.confidence)
+            .bind(&entity_type)
+            .bind(&entity_name)
+            .bind(entity_confidence)
             .bind(now_at)
             .execute(&mut *tx)
             .await
             .map_err(|_| AppError::Internal)?;
             entity_ids.push(entity_id);
             graph_entities.push(GraphEntitySync {
-                entity_type: entity.entity_type,
-                entity_name: entity.entity_name,
-                confidence: entity.confidence,
+                entity_type,
+                entity_name,
+                confidence: entity_confidence,
             });
             created_entity_count += 1;
         }
@@ -529,6 +532,8 @@ pub async fn execute_extraction_run(
             })
             .await;
 
+        let reason_summary = recommendation.reason_summary.clone();
+        let disposal_advice = recommendation.disposal_advice.join(" | ");
         sqlx::query(
             r#"
             UPDATE risk_cases
@@ -539,8 +544,8 @@ pub async fn execute_extraction_run(
             "#,
         )
         .bind(case.id)
-        .bind(recommendation.reason_summary)
-        .bind(recommendation.disposal_advice.join(" | "))
+        .bind(&reason_summary)
+        .bind(&disposal_advice)
         .bind(now_at)
         .execute(&mut *tx)
         .await
@@ -552,6 +557,9 @@ pub async fn execute_extraction_run(
                 continue;
             }
 
+            let relation_type = relation.relation_type.clone();
+            let relation_confidence = relation.confidence;
+
             sqlx::query(
                 r#"
                 INSERT INTO graph_relations (
@@ -561,7 +569,7 @@ pub async fn execute_extraction_run(
                 "#,
             )
             .bind(Uuid::new_v4())
-            .bind(relation.relation_type)
+            .bind(&relation_type)
             .bind(entity_ids[relation.source_index])
             .bind(entity_ids[relation.target_index])
             .bind(now_at)
@@ -569,10 +577,10 @@ pub async fn execute_extraction_run(
             .await
             .map_err(|_| AppError::Internal)?;
             graph_relations.push(GraphRelationSync {
-                relation_type: relation.relation_type,
+                relation_type,
                 source_entity_name: graph_entities[relation.source_index].entity_name.clone(),
                 target_entity_name: graph_entities[relation.target_index].entity_name.clone(),
-                confidence: relation.confidence,
+                confidence: relation_confidence,
             });
             created_relation_count += 1;
         }
@@ -592,7 +600,7 @@ pub async fn execute_extraction_run(
             case_id: case.id.to_string(),
             case_code: case.case_code.clone(),
             title: case.title.clone(),
-            summary: recommendation.reason_summary.clone(),
+            summary: reason_summary,
             risk_level: case.risk_level.clone(),
             source_type: case.source_type.clone(),
             area_name: case.area_name.clone(),

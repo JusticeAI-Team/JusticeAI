@@ -12,9 +12,14 @@ gremlin_url = "ws://127.0.0.1:8182/gremlin"
 
 [milvus]
 address = "http://127.0.0.1:19530"
+username = "root"
+password = "Milvus"
+token = ""
 
 [vllm]
 base_url = "http://127.0.0.1:8000/v1"
+model_name = "Qwen2.5-Coder-7B-Instruct"
+api_key = ""
 
 [storage]
 upload_dir = "./runtime/uploads"

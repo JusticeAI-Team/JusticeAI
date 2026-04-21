@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tracing::warn;
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,8 +129,10 @@ impl OpenAiCompatibleAiService {
         let prompt = format!(
             "Case title: {}\nArea: {}\nSource type: {}\nRisk level: {}\n\
              Return a JSON object with keys summary, entities, relations.\n\
+             Allowed entity_type values: person, organization, department, event, area, risk_factor.\n\
              entities is an array of objects {{\"entity_type\":string,\"entity_name\":string,\"confidence\":number}}.\n\
              relations is an array of objects {{\"relation_type\":string,\"source_entity_name\":string,\"target_entity_name\":string,\"confidence\":number}}.\n\
+             Every source_entity_name and target_entity_name in relations must exactly match an entity_name that appears in entities.\n\
              Only return JSON.",
             input.title, input.area_name, input.source_type, input.risk_level
         );
@@ -271,7 +272,7 @@ impl OpenAiCompatibleAiService {
         let resolved_model_name = self
             .resolve_model_name()
             .await
-            .unwrap_or_else(|| self.preferred_model_name.clone());
+            .unwrap_or_else(|_| self.preferred_model_name.clone());
 
         ModelContract {
             model_name: resolved_model_name,
@@ -500,7 +501,7 @@ fn normalize_entity_type(entity_type: &str) -> String {
         "organization" | "org" => "organization".to_string(),
         "department" => "department".to_string(),
         "area" | "location" | "region" => "area".to_string(),
-        "risk_factor" | "riskfactor" => "risk_factor".to_string(),
+        "risk_factor" | "riskfactor" | "issue" | "problem" => "risk_factor".to_string(),
         "event" => "event".to_string(),
         _ => entity_type.trim().to_ascii_lowercase(),
     }

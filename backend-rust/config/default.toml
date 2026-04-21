@@ -17,10 +17,14 @@ password = "admin"
 
 [milvus]
 address = "http://milvus:19530"
+username = "root"
+password = "Milvus"
+token = ""
 
 [vllm]
 base_url = "http://vllm:8000/v1"
 model_name = "Qwen2.5-32B-Instruct-AWQ"
+api_key = ""
 
 [storage]
 upload_dir = "./runtime/uploads"

@@ -62,12 +62,20 @@ pub struct HugeGraphConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct MilvusConfig {
     pub address: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VllmConfig {
     pub base_url: String,
     pub model_name: String,
+    #[serde(default)]
+    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
