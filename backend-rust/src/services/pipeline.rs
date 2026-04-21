@@ -427,10 +427,10 @@ pub async fn execute_extraction_run(
     .bind(scope_type)
     .bind(&mode)
     .bind(cases.len() as i32)
-    .bind("running placeholder extraction with OpenAI-compatible boundary")
+    .bind("running OpenAI-compatible extraction pipeline")
     .bind(now_at)
-    .bind(ai_service.contract().provider_style)
-    .bind(ai_service.contract().model_name)
+    .bind(ai_service.configured_contract().provider_style)
+    .bind(ai_service.configured_contract().model_name)
     .execute(&mut *tx)
     .await
     .map_err(|_| AppError::Internal)?;
@@ -474,7 +474,7 @@ pub async fn execute_extraction_run(
             ..
         } = extracted;
 
-        let mut entity_ids = Vec::with_capacity(extracted.entities.len());
+        let mut entity_ids = Vec::with_capacity(entities.len());
         let mut graph_entities = Vec::with_capacity(entities.len());
         for entity in entities {
             let entity_id = Uuid::new_v4();

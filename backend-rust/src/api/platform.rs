@@ -14,10 +14,12 @@ use crate::{
     app::AppState,
     services::{
         ai::{
-            ModelContract as AiModelContract, PlaceholderAiService, RecommendationInput,
+            ModelContract as AiModelContract, OpenAiCompatibleAiService, RecommendationInput,
             ReportInput,
         },
+        graph::HugeGraphSyncService,
         pipeline::{execute_extraction_run, process_import_batch},
+        vector::{MilvusVectorStore, SimilarCaseHit},
     },
     shared::{
         error::AppError,
@@ -3627,7 +3629,9 @@ fn bool_setting(values: &HashMap<String, String>, key: &str, default: bool) -> b
 }
 
 fn build_ai_service(state: &AppState, values: &HashMap<String, String>) -> PlaceholderAiService {
-    PlaceholderAiService::new(
+fn build_ai_service(state: &AppState, values: &HashMap<String, String>) -> OpenAiCompatibleAiService {
+    OpenAiCompatibleAiService::new(
+        state.http_client().clone(),
         values
             .get("model_base_url")
             .cloned()
@@ -3636,7 +3640,82 @@ fn build_ai_service(state: &AppState, values: &HashMap<String, String>) -> Place
             .get("model_name")
             .cloned()
             .unwrap_or_else(|| state.settings().vllm.model_name.clone()),
-        bool_setting(values, "model_api_key_configured", false),
+        values
+            .get("openai_api_key")
+            .cloned()
+            .or_else(|| {
+                state
+                    .settings()
+                    .vllm
+                    .api_key
+                    .trim()
+                    .is_empty()
+                    .then_some(String::new())
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| {
+                (!state.settings().vllm.api_key.trim().is_empty())
+                    .then_some(state.settings().vllm.api_key.clone())
+            }),
+    )
+}
+
+fn build_hugegraph_service(
+    state: &AppState,
+    values: &HashMap<String, String>,
+) -> HugeGraphSyncService {
+    HugeGraphSyncService::new(
+        state.http_client().clone(),
+        values
+            .get("hugegraph_base_url")
+            .cloned()
+            .unwrap_or_else(|| state.settings().hugegraph.base_url.clone()),
+        state.settings().hugegraph.username.clone(),
+        state.settings().hugegraph.password.clone(),
+    )
+}
+
+fn build_vector_store(
+    state: &AppState,
+    values: &HashMap<String, String>,
+) -> MilvusVectorStore {
+    let token = values
+        .get("milvus_token")
+        .cloned()
+        .or_else(|| {
+            if !state.settings().milvus.token.trim().is_empty() {
+                Some(state.settings().milvus.token.clone())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if !state.settings().milvus.username.trim().is_empty()
+                && !state.settings().milvus.password.trim().is_empty()
+            {
+                Some(format!(
+                    "{}:{}",
+                    state.settings().milvus.username,
+                    state.settings().milvus.password
+                ))
+            } else {
+                None
+            }
+        })
+        .or_else(|| Some("root:Milvus".to_string()));
+
+    MilvusVectorStore::new(
+        state.http_client().clone(),
+        values
+            .get("milvus_address")
+            .cloned()
+            .unwrap_or_else(|| state.settings().milvus.address.clone()),
+        token,
+        values
+            .get("milvus_collection")
+            .cloned()
+            .unwrap_or_else(|| "justiceai_cases".to_string()),
+        256,
     )
 }
 
@@ -3660,7 +3739,7 @@ fn build_platform_settings_response(
                 .cloned()
                 .unwrap_or_else(|| settings.app.env.clone()),
             api_base_path: "/api".to_string(),
-            model_name: ai_service.contract().model_name,
+            model_name: ai_service.configured_contract().model_name,
         },
         integrations: vec![
             IntegrationStatusItem {
@@ -3709,7 +3788,7 @@ fn build_platform_settings_response(
                 key: "model_service".to_string(),
                 label: "Model Service".to_string(),
                 status: "configured".to_string(),
-                endpoint: ai_service.contract().base_url.clone(),
+                endpoint: ai_service.configured_contract().base_url.clone(),
             },
         ],
         storage: HashMap::from([
@@ -3735,8 +3814,8 @@ fn build_platform_settings_response(
                     .unwrap_or_else(|| settings.storage.training_dir.clone()),
             ),
         ]),
-        model_contract: ai_service.contract(),
-        is_placeholder: ai_service.contract().is_placeholder,
+        model_contract: ai_service.configured_contract(),
+        is_placeholder: ai_service.configured_contract().is_placeholder,
     }
 }
 
