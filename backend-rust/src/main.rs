@@ -1,12 +1,15 @@
 mod api;
 mod app;
+mod bootstrap;
 mod config_loader;
+mod services;
 mod shared;
 
 use std::{net::SocketAddr, path::Path, time::Duration};
 
 use anyhow::Context;
 use app::{build_app, AppState, Settings};
+use bootstrap::initialize_workspace_schema;
 use tokio::{net::TcpListener, signal};
 use tracing::{error, info};
 
@@ -34,6 +37,12 @@ async fn main() -> anyhow::Result<()> {
         .context("连接 PostgreSQL 失败")?;
 
     info!("PostgreSQL 连接成功");
+
+    initialize_workspace_schema(&database_pool)
+        .await
+        .context("初始化工作台数据结构失败")?;
+
+    info!("工作台基础数据结构已就绪");
 
     let state = AppState::new(settings.clone(), database_pool);
     let app = build_app(state);

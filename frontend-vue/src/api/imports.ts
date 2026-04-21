@@ -1,4 +1,14 @@
 import { requestJson } from './client'
+import type {
+  DashboardOverviewResponse,
+  IngestionBatchListResponse,
+  IngestionSummaryResponse,
+  MappingCurrentResponse,
+  ExtractionSummaryResponse,
+  GraphOverviewResponse,
+  DispatchTaskListResponse,
+  EvaluationSummaryResponse,
+} from '../types/workspace'
 
 export interface ImportListParams {
   page?: number
@@ -74,4 +84,36 @@ export async function uploadImportFile(file: File) {
     method: 'POST',
     body,
   })
+}
+
+export async function fetchIngestionSummary() {
+  return requestJson<IngestionSummaryResponse>('/ingestion/summary')
+}
+
+export async function fetchIngestionBatches() {
+  return requestJson<IngestionBatchListResponse>('/ingestion/batches')
+}
+
+export async function fetchMappingCurrent() {
+  return requestJson<MappingCurrentResponse>('/mapping/current')
+}
+
+export async function fetchExtractionSummary() {
+  return requestJson<ExtractionSummaryResponse>('/extraction/summary')
+}
+
+export async function fetchGraphOverview() {
+  return requestJson<GraphOverviewResponse>('/graph/overview')
+}
+
+export async function fetchDispatchTasks() {
+  return requestJson<DispatchTaskListResponse>('/dispatch/tasks')
+}
+
+export async function fetchEvaluationSummary() {
+  return requestJson<EvaluationSummaryResponse>('/evaluation/summary')
+}
+
+export async function fetchHomeOverview() {
+  return requestJson<DashboardOverviewResponse>('/dashboard/overview')
 }

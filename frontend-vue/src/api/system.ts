@@ -1,4 +1,5 @@
 import { requestJson } from './client'
+import type { PlatformSettingsResponse } from '../types/workspace'
 
 export interface HealthDependencyStatuses {
   postgres: string
@@ -68,4 +69,8 @@ export async function fetchHealth() {
 
 export async function fetchSystemInfo() {
   return requestJson<SystemInfoResponse>('/system/info')
+}
+
+export async function fetchPlatformSettings() {
+  return requestJson<PlatformSettingsResponse>('/settings/platform')
 }

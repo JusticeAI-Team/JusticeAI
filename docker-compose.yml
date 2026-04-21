@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: justiceai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: justiceai
+      POSTGRES_USER: justiceai
+      POSTGRES_PASSWORD: justiceai
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./docker-data/postgres:/var/lib/postgresql/data
+      - ./backend-rust/sql/init_import_tables.sql:/docker-entrypoint-initdb.d/001-init_import_tables.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U justiceai -d justiceai"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend-rust
+      dockerfile: Dockerfile
+    container_name: justiceai-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      RUST_LOG: info,sqlx=warn,tower_http=info
+      APP__NAME: JusticeAI Backend
+      APP__HOST: 0.0.0.0
+      APP__PORT: 8088
+      APP__ENV: development
+      DATABASE__URL: postgres://justiceai:justiceai@postgres:5432/justiceai
+      DATABASE__MAX_CONNECTIONS: 10
+      DATABASE__ACQUIRE_TIMEOUT_SECS: 5
+      HUGEGRAPH__BASE_URL: http://host.docker.internal:8080
+      HUGEGRAPH__GREMLIN_URL: ws://host.docker.internal:8182/gremlin
+      HUGEGRAPH__USERNAME: admin
+      HUGEGRAPH__PASSWORD: admin
+      MILVUS__ADDRESS: http://host.docker.internal:19530
+      VLLM__BASE_URL: http://host.docker.internal:8000/v1
+      VLLM__MODEL_NAME: Qwen2.5-32B-Instruct-AWQ
+      STORAGE__UPLOAD_DIR: /data/uploads
+      STORAGE__REPORT_DIR: /data/reports
+      STORAGE__TRAINING_DIR: /data/training
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./docker-data/runtime/uploads:/data/uploads
+      - ./docker-data/runtime/reports:/data/reports
+      - ./docker-data/runtime/training:/data/training
+
+  frontend:
+    build:
+      context: ./frontend-vue
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    container_name: justiceai-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "18100:80"

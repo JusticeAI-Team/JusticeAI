@@ -1,120 +1,146 @@
 <template>
   <div class="app-shell">
     <a class="skip-link" href="#main-content">跳到主要内容</a>
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">JusticeAI</p>
-        <h1>本地联调控制台</h1>
-      </div>
-      <nav class="nav" aria-label="主导航">
-        <RouterLink class="nav-link" to="/setup">系统准备</RouterLink>
-        <RouterLink class="nav-link" to="/imports">导入中心</RouterLink>
-      </nav>
-    </header>
 
-    <main id="main-content" class="content" tabindex="-1">
-      <router-view />
+    <nav class="top-nav" aria-label="主导航">
+      <div class="wrap nav-row">
+        <div class="nav-brand-cluster">
+          <RouterLink class="logo" to="/">
+            <span class="mark"></span>
+            JusticeAI
+          </RouterLink>
+          <div class="nav-edition">检察业务流程前端</div>
+        </div>
+
+        <div class="navlinks">
+          <RouterLink v-for="item in navItems" :key="item.path" :to="item.path">{{ item.label }}</RouterLink>
+        </div>
+
+        <div class="navcta">
+          <div class="nav-stage">
+            <span class="kbd">{{ currentStageCode }}</span>
+            <span class="nav-stage-label">{{ currentStageTitle }}</span>
+          </div>
+          <RouterLink class="btn primary" :to="actionLink.path">
+            {{ actionLink.label }}
+            <span class="arrow">→</span>
+          </RouterLink>
+        </div>
+      </div>
+    </nav>
+
+    <main id="main-content" class="page-root" tabindex="-1">
+      <RouterView />
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { RouterLink } from 'vue-router'
+import { computed } from 'vue'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { workflowSteps } from './workflow/catalog'
+
+const route = useRoute()
+
+const navItems = [
+  { label: '总览', path: '/' },
+  { label: '系统准备', path: '/setup' },
+  { label: '数据归集', path: '/data-ingestion' },
+  { label: '风险研判', path: '/risk-analysis' },
+  { label: '监督协调', path: '/supervision' },
+  { label: '报告输出', path: '/reports' },
+]
+
+const currentStep = computed(() => workflowSteps.find((item) => item.path === route.path) ?? null)
+
+const currentStageCode = computed(() => currentStep.value?.stageCode ?? 'OVR')
+const currentStageTitle = computed(() => currentStep.value?.title ?? '流程总览')
+
+const actionLink = computed(() => {
+  if (route.path === '/') {
+    return { label: '进入系统准备', path: '/setup' }
+  }
+
+  const currentIndex = workflowSteps.findIndex((item) => item.path === route.path)
+  const nextStep = currentIndex >= 0 && currentIndex < workflowSteps.length - 1 ? workflowSteps[currentIndex + 1] : null
+
+  if (nextStep) {
+    return { label: `下一步 ${nextStep.title}`, path: nextStep.path }
+  }
+
+  return { label: '回到总览', path: '/' }
+})
 </script>
 
 <style scoped>
-.app-shell {
-  min-height: 100vh;
-  background: #f5f7fa;
-  color: #1f2937;
-}
-
 .skip-link {
   position: absolute;
   left: 16px;
   top: -48px;
-  z-index: 10;
-  padding: 8px 12px;
-  border-radius: 8px;
-  color: #fff;
-  background: #2e7d32;
-  text-decoration: none;
+  z-index: 40;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper-2);
 }
 
 .skip-link:focus {
   top: 16px;
 }
 
-.topbar {
-  display: flex;
-  justify-content: space-between;
+.nav-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 24px;
   align-items: center;
-  gap: 16px;
-  padding: 20px 24px;
-  border-bottom: 1px solid #dcdfe6;
-  background: #ffffff;
-  flex-wrap: wrap;
 }
 
-.topbar h1 {
-  margin: 0;
-  font-size: 24px;
+.nav-brand-cluster {
+  display: flex;
+  align-items: center;
+  gap: 14px;
 }
 
-.eyebrow {
-  margin: 0 0 6px;
-  font-size: 12px;
-  letter-spacing: 0.08em;
+.nav-edition {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: #2e7d32;
 }
 
-.nav {
+.nav-stage {
   display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.nav-link {
-  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  min-height: 36px;
-  padding: 0 14px;
-  border: 1px solid #d0d7de;
-  border-radius: 999px;
-  color: #1f2937;
-  text-decoration: none;
-  background: #fff;
+  gap: 10px;
 }
 
-.nav-link.router-link-active {
-  border-color: #2e7d32;
-  color: #2e7d32;
-  background: #e8f5e9;
+.nav-stage-label {
+  color: var(--muted);
+  font-size: 12px;
 }
 
-.content {
-  max-width: 1120px;
-  margin: 0 auto;
-  padding: 24px;
+@media (max-width: 1080px) {
+  .nav-row {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .nav-brand-cluster,
+  .navcta {
+    justify-content: space-between;
+  }
 }
 
-@media (max-width: 768px) {
-  .topbar {
-    padding: 16px;
+@media (max-width: 640px) {
+  .nav-edition,
+  .nav-stage-label {
+    display: none;
   }
 
-  .nav {
-    width: 100%;
-  }
-
-  .nav-link {
-    flex: 1 1 calc(50% - 12px);
-  }
-
-  .content {
-    padding: 16px;
+  .nav-brand-cluster,
+  .navcta {
+    gap: 10px;
   }
 }
 </style>
