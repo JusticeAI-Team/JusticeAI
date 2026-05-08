@@ -1,146 +1,314 @@
 <template>
-  <div class="app-shell">
-    <a class="skip-link" href="#main-content">跳到主要内容</a>
-
-    <nav class="top-nav" aria-label="主导航">
-      <div class="wrap nav-row">
-        <div class="nav-brand-cluster">
-          <RouterLink class="logo" to="/">
-            <span class="mark"></span>
-            JusticeAI
-          </RouterLink>
-          <div class="nav-edition">检察业务流程前端</div>
-        </div>
-
-        <div class="navlinks">
-          <RouterLink v-for="item in navItems" :key="item.path" :to="item.path">{{ item.label }}</RouterLink>
-        </div>
-
-        <div class="navcta">
-          <div class="nav-stage">
-            <span class="kbd">{{ currentStageCode }}</span>
-            <span class="nav-stage-label">{{ currentStageTitle }}</span>
-          </div>
-          <RouterLink class="btn primary" :to="actionLink.path">
-            {{ actionLink.label }}
-            <span class="arrow">→</span>
-          </RouterLink>
-        </div>
+  <el-container class="hud-layout-container">
+    <!-- 1. 侧边栏：明亮政务/科研风格 -->
+    <el-aside width="240px" class="hud-aside">
+      <div class="logo-box">
+        <span class="logo-icon"></span>
+        <span class="logo-text">数智检察预警平台</span>
       </div>
-    </nav>
+      
+      <el-menu
+        active-text-color="#122E8A"
+        background-color="transparent"
+        text-color="#666666"
+        :default-active="activeMenu"
+        class="hud-menu"
+        @select="handleMenuSelect"
+      >
+        <el-menu-item index="1">
+          <i class="el-icon-data-board"></i>
+          <span>全景风险指挥大屏</span>
+        </el-menu-item>
+        <el-menu-item index="2">
+          <i class="el-icon-cpu"></i>
+          <span>检察官智能工作台</span>
+        </el-menu-item>
+        <el-menu-item index="3">
+          <i class="el-icon-warning-outline"></i>
+          <span>线索审核与预警</span>
+        </el-menu-item>
+        <el-menu-item index="4">
+          <i class="el-icon-document"></i>
+          <span>文书辅助生成</span>
+        </el-menu-item>
+        <el-menu-item index="5">
+          <i class="el-icon-connection"></i>
+          <span>异构数据接入</span>
+        </el-menu-item>
+      </el-menu>
+      
+      <!-- 左下角系统版本标识 -->
+      <div class="aside-footer">
+        <div class="sys-version">SYS.VER: GLM-5.1.0</div>
+        <div class="sys-status"><span class="blink-dot"></span> CONNECTION SECURE</div>
+      </div>
+    </el-aside>
 
-    <main id="main-content" class="page-root" tabindex="-1">
-      <RouterView />
-    </main>
-  </div>
+    <el-container>
+      <!-- 2. 顶部 Header：明亮指挥中心风格 -->
+      <el-header class="hud-header">
+        <div class="header-left">
+          <span class="title-decorator"></span>
+          <span class="main-title">基层社会治理重点领域风险研判一体化平台</span>
+        </div>
+        
+        <div class="header-right">
+       
+          <el-dropdown trigger="click">
+            <div class="user-profile">
+              <div class="avatar-box">检</div>
+              <span class="user-name">检察官：测试用户</span>
+            </div>
+            <template #dropdown>
+              <el-dropdown-menu class="hud-dropdown">
+                <el-dropdown-item>个人中心</el-dropdown-item>
+                <el-dropdown-item>系统设置</el-dropdown-item>
+                <el-dropdown-item divided style="color: #D9363E; font-weight: bold;">退出终端</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
+      </el-header>
+      
+      <!-- 3. 主体内容区：你之前改好的柔奶白页面会在这里渲染 -->
+      <el-main class="hud-main">
+        <div class="main-content-wrapper">
+          <AgentWorkspace v-if="activeMenu === '2'" />
+          <WarningCenter v-else-if="activeMenu === '3'" />
+          <DocumentAssistant v-else-if="activeMenu === '4'" />
+          <DataIntegration v-else-if="activeMenu === '5'" />
+          <Dashboard v-else />
+        </div>
+      </el-main>
+    </el-container>
+  </el-container>
 </template>
 
-<script setup lang="ts">
-import { computed } from 'vue'
-import { RouterLink, RouterView, useRoute } from 'vue-router'
-import { workflowSteps } from './workflow/catalog'
+<script setup>
+import { ref } from 'vue'
+import Dashboard from './components/Dashboard.vue'
+import AgentWorkspace from './components/AgentWorkspace.vue'
+import WarningCenter from './components/WarningCenter.vue'
+import DocumentAssistant from './components/DocumentAssistant.vue'
+import DataIntegration from './components/DataIntegration.vue'
 
-const route = useRoute()
+const activeMenu = ref('5') // 默认停留你在截图里的页面，可自行更改
 
-const navItems = [
-  { label: '总览', path: '/' },
-  { label: '系统准备', path: '/setup' },
-  { label: '数据归集', path: '/data-ingestion' },
-  { label: '风险研判', path: '/risk-analysis' },
-  { label: '监督协调', path: '/supervision' },
-  { label: '报告输出', path: '/reports' },
-]
-
-const currentStep = computed(() => workflowSteps.find((item) => item.path === route.path) ?? null)
-
-const currentStageCode = computed(() => currentStep.value?.stageCode ?? 'OVR')
-const currentStageTitle = computed(() => currentStep.value?.title ?? '流程总览')
-
-const actionLink = computed(() => {
-  if (route.path === '/') {
-    return { label: '进入系统准备', path: '/setup' }
-  }
-
-  const currentIndex = workflowSteps.findIndex((item) => item.path === route.path)
-  const nextStep = currentIndex >= 0 && currentIndex < workflowSteps.length - 1 ? workflowSteps[currentIndex + 1] : null
-
-  if (nextStep) {
-    return { label: `下一步 ${nextStep.title}`, path: nextStep.path }
-  }
-
-  return { label: '回到总览', path: '/' }
-})
+const handleMenuSelect = (index) => {
+  activeMenu.value = index
+}
 </script>
 
 <style scoped>
-.skip-link {
-  position: absolute;
-  left: 16px;
-  top: -48px;
-  z-index: 40;
-  padding: 10px 14px;
-  border-radius: 999px;
-  background: var(--ink);
-  color: var(--paper-2);
+/* 强制整个应用的底色变为柔奶白 */
+.hud-layout-container {
+  height: 100vh;
+  background-color: #F5EFEA;
+  font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  overflow: hidden;
 }
 
-.skip-link:focus {
-  top: 16px;
+/* ================= 侧边栏样式 ================= */
+.hud-aside {
+  background: #FFFFFF;
+  border-right: 1px solid rgba(18, 46, 138, 0.1);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 2px 0 15px rgba(0, 0, 0, 0.03);
+  position: relative;
+  z-index: 10;
 }
 
-.nav-row {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 24px;
-  align-items: center;
-}
-
-.nav-brand-cluster {
+.logo-box {
+  height: 60px;
   display: flex;
   align-items: center;
-  gap: 14px;
+  justify-content: center;
+  gap: 10px;
+  border-bottom: 1px solid rgba(18, 46, 138, 0.1);
+  background: rgba(18, 46, 138, 0.02);
 }
 
-.nav-edition {
-  color: var(--muted);
-  font-family: var(--mono);
+.logo-icon {
+  width: 14px;
+  height: 14px;
+  background: #122E8A;
+  transform: rotate(45deg);
+}
+
+.logo-text {
+  font-size: 16px;
+  font-weight: 900;
+  color: #122E8A;
+  letter-spacing: 1px;
+}
+
+/* 覆盖 Element Plus 菜单默认样式 */
+.hud-menu {
+  border-right: none !important;
+  flex: 1;
+  padding: 15px 10px;
+}
+
+:deep(.el-menu-item) {
+  height: 44px;
+  line-height: 44px;
+  margin-bottom: 8px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  transition: all 0.3s;
+}
+
+:deep(.el-menu-item:hover) {
+  background-color: rgba(18, 46, 138, 0.05) !important;
+  color: #122E8A !important;
+}
+
+:deep(.el-menu-item.is-active) {
+  background-color: rgba(18, 46, 138, 0.08) !important;
+  border-left: 4px solid #122E8A;
+  font-weight: bold;
+}
+
+.aside-footer {
+  padding: 20px 15px;
+  border-top: 1px solid rgba(18, 46, 138, 0.1);
+  font-family: 'JetBrains Mono', Consolas, monospace;
+}
+
+.sys-version {
   font-size: 11px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
+  color: #666;
+  margin-bottom: 5px;
+  font-weight: bold;
 }
 
-.nav-stage {
+.sys-status {
+  font-size: 11px;
+  color: #0F7E3B; /* 偏深的绿色更适合明亮主题 */
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: bold;
+}
+
+.blink-dot {
+  width: 8px;
+  height: 8px;
+  background: #52C41A;
+  border-radius: 50%;
+  animation: blink 2s infinite;
+}
+
+/* ================= 顶部 Header 样式 ================= */
+.hud-header {
+  height: 60px;
+  background: #FFFFFF;
+  border-bottom: 1px solid rgba(18, 46, 138, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 30px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.02);
+  z-index: 9;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.title-decorator {
+  width: 4px;
+  height: 18px;
+  background: #122E8A;
+  border-radius: 2px;
+}
+
+.main-title {
+  font-size: 17px;
+  font-weight: 900;
+  color: #122E8A;
+  letter-spacing: 1px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.user-profile {
   display: flex;
   align-items: center;
   gap: 10px;
+  cursor: pointer;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  transition: 0.3s;
 }
 
-.nav-stage-label {
-  color: var(--muted);
-  font-size: 12px;
+.user-profile:hover {
+  background: rgba(18, 46, 138, 0.05);
+  border-color: rgba(18, 46, 138, 0.2);
 }
 
-@media (max-width: 1080px) {
-  .nav-row {
-    grid-template-columns: 1fr;
-    gap: 14px;
-  }
-
-  .nav-brand-cluster,
-  .navcta {
-    justify-content: space-between;
-  }
+.avatar-box {
+  width: 30px;
+  height: 30px;
+  background: rgba(18, 46, 138, 0.1);
+  border: 1px solid #122E8A;
+  color: #122E8A;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 900;
+  border-radius: 4px;
 }
 
-@media (max-width: 640px) {
-  .nav-edition,
-  .nav-stage-label {
-    display: none;
-  }
-
-  .nav-brand-cluster,
-  .navcta {
-    gap: 10px;
-  }
+.user-name {
+  font-size: 13px;
+  font-weight: bold;
+  color: #333;
 }
+
+/* ================= 主体区域 ================= */
+.hud-main {
+  padding: 0; /* 清除默认内边距 */
+  background-color: transparent;
+  position: relative;
+  overflow: hidden;
+}
+
+.main-content-wrapper {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+/* Element Plus 下拉菜单强制适配明亮主题 */
+:global(.el-popper.is-light) {
+  background: #FFFFFF !important;
+  border: 1px solid rgba(18, 46, 138, 0.15) !important;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08) !important;
+}
+:global(.el-popper.is-light .el-popper__arrow::before) {
+  background: #FFFFFF !important;
+  border: 1px solid rgba(18, 46, 138, 0.15) !important;
+}
+:global(.el-dropdown-menu__item) {
+  color: #333 !important;
+  font-weight: 500;
+}
+:global(.el-dropdown-menu__item:hover) {
+  background-color: rgba(18, 46, 138, 0.05) !important;
+  color: #122E8A !important;
+}
+
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 </style>
