@@ -1,0 +1,48 @@
+:root {
+  /* 核心 HUD 变量 */
+  --hud-bg-color: #030816;
+  --hud-panel-bg: rgba(9, 24, 51, 0.65);
+  --hud-border-cyan: rgba(0, 238, 255, 0.3);
+  --hud-border-glow: rgba(0, 238, 255, 0.6);
+  --hud-text-primary: #E2F1FF;
+  --hud-text-secondary: #7DA5C9;
+  --hud-text-accent: #00EEFF;
+  
+  --sans: system-ui, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --mono: 'JetBrains Mono', Consolas, ui-monospace, monospace;
+
+  font: 14px/1.5 var(--sans);
+  color-scheme: dark;
+  color: var(--hud-text-primary);
+  background: var(--hud-bg-color);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+}
+
+/* Element Plus 全局下拉菜单暗黑化覆盖 */
+.el-popper.is-light {
+  background: rgba(9, 24, 51, 0.9) !important;
+  border: 1px solid var(--hud-border-cyan) !important;
+  backdrop-filter: blur(10px);
+}
+.el-popper.is-light .el-popper__arrow::before {
+  background: rgba(9, 24, 51, 0.9) !important;
+  border: 1px solid var(--hud-border-cyan) !important;
+}
+.el-dropdown-menu__item {
+  color: var(--hud-text-primary) !important;
+}
+.el-dropdown-menu__item:hover {
+  background-color: rgba(0, 238, 255, 0.15) !important;
+  color: var(--hud-text-accent) !important;
+}
+.el-dropdown-menu__item--divided {
+  border-top: 1px solid rgba(0, 238, 255, 0.2) !important;
+}
