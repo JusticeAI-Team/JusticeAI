@@ -1,6 +1,5 @@
 pub mod health;
 pub mod import;
-pub mod import_query;
 pub mod platform;
 pub mod system;
 
@@ -13,6 +12,5 @@ pub fn routes() -> Router<AppState> {
         .merge(health::routes())
         .merge(system::routes())
         .merge(import::routes())
-        .merge(import_query::routes())
         .merge(platform::routes())
 }

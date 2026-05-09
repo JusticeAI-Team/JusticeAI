@@ -34,7 +34,7 @@ export const apiDownloadUrl = (path) => buildUrl(path)
 export const apiUploadImport = (file) => {
   const formData = new FormData()
   formData.append('file', file)
-  return request('/import/upload', {
+  return request('/ingestion/upload', {
     method: 'POST',
     body: formData
   })

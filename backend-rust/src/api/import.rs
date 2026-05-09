@@ -24,7 +24,7 @@ const MAX_UPLOAD_REQUEST_BYTES: usize = MAX_UPLOAD_FILE_BYTES + 1024 * 1024;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/import/upload", post(upload))
+        .route("/ingestion/upload", post(upload))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_REQUEST_BYTES))
 }
 
