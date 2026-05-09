@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 
 use axum::{
-    extract::{multipart::MultipartError, DefaultBodyLimit, Multipart, State},
-    http::StatusCode,
+    async_trait,
+    extract::{
+        multipart::{MultipartError, MultipartRejection},
+        DefaultBodyLimit, FromRequest, Multipart, Request, State,
+    },
     routing::post,
     Router,
 };
@@ -41,6 +44,23 @@ struct StorageTarget {
     absolute_path: PathBuf,
 }
 
+struct PlatformMultipart(Multipart);
+
+#[async_trait]
+impl<S> FromRequest<S> for PlatformMultipart
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Multipart::from_request(req, state)
+            .await
+            .map(Self)
+            .map_err(map_multipart_rejection)
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct UploadResponse {
     import_id: Uuid,
@@ -60,7 +80,7 @@ struct UploadedFileInfo {
 
 async fn upload(
     State(state): State<AppState>,
-    multipart: Multipart,
+    PlatformMultipart(multipart): PlatformMultipart,
 ) -> Result<axum::Json<ApiResponse<UploadResponse>>, AppError> {
     let payload = read_upload_field(multipart).await?;
     let now = Utc::now();
@@ -187,11 +207,15 @@ fn cleanup_uploaded_file(target: &StorageTarget) {
 }
 
 fn map_multipart_error(error: MultipartError) -> AppError {
-    match error.status() {
-        StatusCode::PAYLOAD_TOO_LARGE => AppError::Validation("上传文件不能超过 10 MB".to_string()),
-        StatusCode::BAD_REQUEST => AppError::Validation("读取上传表单失败".to_string()),
-        _ => AppError::Internal,
-    }
+    AppError::Validation(match error.status() {
+        axum::http::StatusCode::PAYLOAD_TOO_LARGE => "上传文件不能超过 10 MB".to_string(),
+        axum::http::StatusCode::BAD_REQUEST => format!("读取上传表单失败：{}", error.body_text()),
+        _ => "读取上传表单失败".to_string(),
+    })
+}
+
+fn map_multipart_rejection(error: MultipartRejection) -> AppError {
+    AppError::Validation(format!("读取上传表单失败：{}", error.body_text()))
 }
 
 async fn read_upload_field(mut multipart: Multipart) -> Result<UploadFilePayload, AppError> {
