@@ -54,7 +54,7 @@
       <div class="ai-suggestion-box">
         <div class="box-title"><span class="blink-dot"></span> AI 实时策略建议</div>
         <div class="typewriter-text">
-          监测到通州区马驹桥周边存在高频“欠薪”关键词语义冲突，系统已自动关联周边 5 家关联企业，建议立即下发“现场核查”指令。
+          {{ aiSuggestion }}
         </div>
         <div class="action-bar">
           <span class="action-link">进入知识图谱深挖 ></span>
@@ -69,7 +69,7 @@
 
     <footer class="hud-footer">
       <div class="sys-info">
-        <i class="el-icon-cpu"></i> 核心模型: 通州专版 GLM-4 | 环境: 内网隔离部署
+        <i class="el-icon-cpu"></i> 核心模型: OpenAI-Compatible / vLLM | 环境: {{ apiError ? '接口需关注' : '内网演示部署' }}
       </div>
       <div class="location">坐标: 116.65, 39.91 (北京市通州区指挥中心)</div>
       <div class="timer">{{ formattedTime }}</div>
@@ -82,11 +82,14 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
 // 引入你本地的通州 GeoJSON 数据
 import tongzhouGeoJson from '../assets/maps/tongzhou.json'
+import { apiGet } from '../api/platform'
 
 const mapChartRef = ref(null)
 const radarChartRef = ref(null)
 const lineChartRef = ref(null)
 const formattedTime = ref('')
+const apiError = ref('')
+const aiSuggestion = ref('正在读取后端监督看板与风险研判聚合数据...')
 
 const liveFeed = ref([
   { time: '12:05:22', level: 'crit', levelText: '极高', msg: '梨园镇工地聚集性投诉预警' },
@@ -105,6 +108,108 @@ const stats = ref([
 let mapIns = null
 let radarIns = null
 let lineIns = null
+
+const metricByKey = (metrics, key) => metrics.find((item) => item.key === key)
+
+const statusLevel = (status, value = 0) => {
+  const normalized = String(status || '').toLowerCase()
+  if (normalized === 'critical' || Number(value) >= 50) return 'crit'
+  if (normalized === 'warning' || Number(value) > 0) return 'high'
+  return 'warn'
+}
+
+const statusText = (level) => {
+  if (level === 'crit') return '极高'
+  if (level === 'high') return '高危'
+  return '关注'
+}
+
+const formatTime = (value) => {
+  const date = value ? new Date(value) : new Date()
+  return date.toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 8)
+}
+
+const loadDashboardData = async () => {
+  try {
+    const [overview, alerts, risk, jobs] = await Promise.all([
+      apiGet('/dashboard/overview'),
+      apiGet('/alerts?page_size=4'),
+      apiGet('/risk/summary'),
+      apiGet('/jobs?page_size=4')
+    ])
+
+    const metrics = overview?.metrics || []
+    const riskCases = Number(metricByKey(metrics, 'risk_cases')?.value || 0)
+    const highRiskCases = Number(metricByKey(metrics, 'high_risk_cases')?.value || 0)
+    const pendingAlerts = Number(metricByKey(metrics, 'pending_alerts')?.value || 0)
+    const inProgressTasks = Number(metricByKey(metrics, 'in_progress_tasks')?.value || 0)
+
+    stats.value = [
+      { label: '风险案件总数', value: String(riskCases), trendUp: true, percent: '实时', progress: Math.min(100, riskCases * 2) },
+      { label: '高风险案件', value: String(highRiskCases), trendUp: true, percent: '重点', progress: Math.min(100, highRiskCases * 12) },
+      { label: '待处理预警', value: String(pendingAlerts), trendUp: pendingAlerts > 0, percent: '预警', progress: Math.min(100, pendingAlerts * 3) },
+      { label: '处置中任务', value: String(inProgressTasks), trendUp: inProgressTasks > 0, percent: '流转', progress: Math.min(100, inProgressTasks * 12) }
+    ]
+
+    const alertFeed = (alerts?.items || []).map((item) => {
+      const level = statusLevel(item.severity, item.severity === 'high' ? 80 : 20)
+      return {
+        time: formatTime(item.created_at),
+        level,
+        levelText: statusText(level),
+        msg: item.title?.replace(/^Alert-|^Demo 预警：/, '') || item.summary || '预警线索'
+      }
+    })
+    const jobFeed = (jobs?.items || []).map((item) => ({
+      time: formatTime(item.updated_at),
+      level: item.status === 'failed' ? 'crit' : item.status === 'completed' ? 'warn' : 'high',
+      levelText: item.status === 'failed' ? '异常' : item.status === 'completed' ? '完成' : '运行',
+      msg: `${item.job_type}: ${item.message || item.status}`
+    }))
+    liveFeed.value = [...alertFeed, ...jobFeed].slice(0, 6)
+
+    const riskMetrics = risk?.metrics || []
+    const closed = Number(metricByKey(riskMetrics, 'closed')?.value || 0)
+    aiSuggestion.value = pendingAlerts > 0
+      ? `当前仍有 ${pendingAlerts} 条待处理预警，其中高风险案件 ${highRiskCases} 条；建议优先进入线索审核页确认预警，并对处置中任务做时限监督。`
+      : `当前风险案件 ${riskCases} 条，已关闭 ${closed} 条；建议继续通过异构数据接入页补充最新 Excel 批次并触发抽取同步。`
+
+    updateChartsFromBackend(riskMetrics)
+    apiError.value = ''
+  } catch (error) {
+    apiError.value = error.message
+    aiSuggestion.value = `后端聚合数据读取失败：${error.message}`
+  }
+}
+
+const updateChartsFromBackend = (riskMetrics = []) => {
+  const total = Number(metricByKey(riskMetrics, 'total')?.value || 1)
+  const high = Number(metricByKey(riskMetrics, 'high')?.value || 0)
+  const pending = Number(metricByKey(riskMetrics, 'pending_review')?.value || 0)
+  const closed = Number(metricByKey(riskMetrics, 'closed')?.value || 0)
+  const medium = Math.max(0, total - high - closed)
+
+  radarIns?.setOption({
+    series: [{
+      data: [{
+        value: [
+          Math.min(100, high * 12),
+          Math.min(100, pending * 8),
+          Math.min(100, total * 2),
+          Math.min(100, medium * 4),
+          Math.min(100, closed * 10)
+        ]
+      }]
+    }]
+  })
+
+  lineIns?.setOption({
+    series: [
+      { data: [high, high + 1, high + 2, high + 1, high + 3, high + 2, high] },
+      { data: [total, total + pending, total + pending + 1, total + high, total + high + 2, total + pending, total] }
+    ]
+  })
+}
 
 const initCharts = () => {
   if (mapChartRef.value) {
@@ -259,6 +364,7 @@ const updateTime = () => {
 let timer = null
 onMounted(() => {
   initCharts()
+  loadDashboardData()
   timer = setInterval(updateTime, 100)
   window.addEventListener('resize', () => {
     mapIns?.resize()

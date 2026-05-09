@@ -8,7 +8,7 @@
       </div>
       <div class="history-list">
         <div class="history-group-label">历史研判线索</div>
-        <div v-for="item in historyTasks" :key="item.id" class="history-item">
+        <div v-for="item in historyTasks" :key="item.id" class="history-item" @click="selectHistoryCase(item)">
           <div class="item-top">
             <span class="item-tag" :class="item.type">{{ item.typeText }}</span>
             <span class="item-time">{{ item.time }}</span>
@@ -24,7 +24,7 @@
       <header class="chat-header">
         <div class="header-info">
           <span class="status-dot pulse"></span>
-          <span class="agent-name">数智检察 Agent 协同中枢 (GLM-5.1)</span>
+          <span class="agent-name">数智检察 Agent 协同中枢 (OpenAI-Compatible)</span>
         </div>
         <div class="header-tools">
           <i class="el-icon-setting"></i>
@@ -52,12 +52,12 @@
             placeholder="输入指令进行风险穿透、文书生成或数据比对..." 
             @keyup.enter="handleSendMessage"
           />
-          <button @click="handleSendMessage">发送指令</button>
+          <button :disabled="isLoading" @click="handleSendMessage">{{ isLoading ? '研判中' : '发送指令' }}</button>
         </div>
         <div class="input-shortcuts">
-          <span>线索溯源</span>
-          <span>生成建议</span>
-          <span>导出简报</span>
+          <span @click="applyShortcut('线索溯源')">线索溯源</span>
+          <span @click="applyShortcut('生成建议')">生成建议</span>
+          <span @click="applyShortcut('导出简报')">导出简报</span>
         </div>
       </footer>
     </main>
@@ -86,28 +86,129 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
 import * as echarts from 'echarts'
+import { ElMessage } from 'element-plus'
+import { apiGet } from '../api/platform'
 
 const chatScrollRef = ref(null)
 const graphRef = ref(null)
 const userInput = ref('')
+const isLoading = ref(false)
 
-const historyTasks = ref([
-  { id: 1, title: '华丰建设欠薪穿透分析', time: '10-24', type: 'risk', typeText: '风险' },
-  { id: 2, title: '运河街道异常资金流向', time: '10-22', type: 'fund', typeText: '资金' },
-  { id: 3, title: '某社区非法集资苗头核查', time: '10-21', type: 'check', typeText: '核查' },
-])
+const historyTasks = ref([])
 
 const messages = ref([
-  { role: 'ai', content: '您好，我是数智检察助理。系统已接入通州区 12345 与 110 双域数据，请下达研判指令。' },
-  { role: 'user', content: '查询“华丰建设有限公司”的潜在风险，并展示其关联关系图谱。' },
-  { 
-    role: 'ai', 
-    content: '正在基于 HugeGraph 进行关联穿透... 已锁定核心嫌疑主体及其背后的 3 层持股关系。',
-    structured: { subject: '华丰建设有限公司', risk: '极高 (92%)', clues: '12345投诉(47条) + 110警情记录(3次)' }
-  }
+  { role: 'ai', content: '您好，我是数智检察助理。系统已接入导入案件、知识实体、图谱关系、预警和处置任务。请输入案件关键词，或从左侧历史研判线索中选择。' }
 ])
 
 let graphIns = null
+
+const riskType = (riskLevel) => {
+  if (riskLevel === 'high') return 'risk'
+  if (riskLevel === 'medium') return 'fund'
+  return 'check'
+}
+
+const riskText = (riskLevel) => {
+  if (riskLevel === 'high') return '高危'
+  if (riskLevel === 'medium') return '中危'
+  return '核查'
+}
+
+const formatDate = (value) => value ? new Date(value).toLocaleDateString('zh-CN').slice(5) : '--'
+
+const loadHistoryCases = async () => {
+  try {
+    const result = await apiGet('/risk/cases?page_size=8')
+    historyTasks.value = (result?.items || []).map((item) => ({
+      id: item.id,
+      title: item.title || item.case_code,
+      time: formatDate(item.updated_at || item.created_at),
+      type: riskType(item.risk_level),
+      typeText: riskText(item.risk_level),
+      caseCode: item.case_code
+    }))
+  } catch (error) {
+    ElMessage.warning(`历史研判线索加载失败：${error.message}`)
+  }
+}
+
+const selectHistoryCase = async (item) => {
+  userInput.value = item.title
+  await runCaseAnalysis(item.id, item.title)
+}
+
+const runCaseAnalysis = async (caseId, queryText) => {
+  isLoading.value = true
+  messages.value.push({ role: 'user', content: `研判线索：${queryText}` })
+  try {
+    const detail = await apiGet(`/risk/cases/${caseId}`)
+    const caseInfo = detail?.case_info || {}
+    const entities = detail?.entities || []
+    const relations = detail?.relations || []
+    const recommendations = detail?.recommendations || {}
+    const advice = Array.isArray(recommendations.disposal_advice)
+      ? recommendations.disposal_advice
+      : (caseInfo.disposal_advice || [])
+
+    messages.value.push({
+      role: 'ai',
+      content: `已完成案件聚合研判：风险等级 <b>${caseInfo.risk_level || '--'}</b>，评分 <b>${caseInfo.risk_score ?? '--'}</b>。图谱同步状态：${caseInfo.graph_sync_status || '--'}，向量索引状态：${caseInfo.vector_sync_status || '--'}。<br/><br/>${recommendations.reason_summary || caseInfo.risk_reason_summary || '后端暂未返回风险原因摘要。'}<br/><br/><b>建议：</b>${advice.length ? advice.join('；') : '请承办检察官复核后补充处置意见。'}`,
+      structured: {
+        subject: caseInfo.title || queryText,
+        risk: `${caseInfo.risk_level || '--'} (${caseInfo.risk_score ?? '--'})`,
+        clues: `实体 ${entities.length} 个 / 关系 ${relations.length} 条 / 预警 ${detail?.alerts?.length || 0} 条`
+      }
+    })
+    renderGraphFromDetail(detail)
+  } catch (error) {
+    messages.value.push({ role: 'ai', content: `研判失败：${error.message}` })
+  } finally {
+    isLoading.value = false
+    nextTick(() => { chatScrollRef.value.scrollTop = chatScrollRef.value.scrollHeight })
+  }
+}
+
+const searchCaseByText = async (text) => {
+  const result = await apiGet('/risk/cases?page_size=20')
+  const keyword = text.trim()
+  return (result?.items || []).find((item) =>
+    item.title?.includes(keyword) ||
+    item.case_code?.includes(keyword) ||
+    keyword.includes(item.case_code) ||
+    keyword.includes(item.title)
+  ) || result?.items?.[0]
+}
+
+const renderGraphFromDetail = (detail) => {
+  const caseInfo = detail?.case_info || {}
+  const entities = detail?.entities || []
+  const relations = detail?.relations || []
+  const nodes = [
+    { name: caseInfo.case_code || '案件', symbolSize: 56, itemStyle: { color: '#122E8A' } },
+    ...entities.map((item, index) => ({
+      name: item.entity_name,
+      symbolSize: Math.max(24, Math.round((item.confidence || 0.7) * 42)),
+      itemStyle: { color: ['#8B5CF6', '#4A90E2', '#D9363E', '#F5A623'][index % 4] }
+    }))
+  ]
+  const links = [
+    ...entities.map((item) => ({
+      source: caseInfo.case_code || '案件',
+      target: item.entity_name,
+      label: { show: true, formatter: item.entity_type || '实体' }
+    })),
+    ...relations.map((item) => {
+      const source = entities.find((entity) => entity.id === item.source_entity_id)?.entity_name
+      const target = entities.find((entity) => entity.id === item.target_entity_id)?.entity_name
+      return source && target ? {
+        source,
+        target,
+        label: { show: true, formatter: item.relation_type || '关联' }
+      } : null
+    }).filter(Boolean)
+  ]
+  graphIns?.setOption({ series: [{ data: nodes, links }] })
+}
 
 const initGraph = () => {
   if (!graphRef.value) return
@@ -174,15 +275,29 @@ const initGraph = () => {
   })
 }
 
-const handleSendMessage = () => {
+const handleSendMessage = async () => {
   if (!userInput.value) return
-  messages.value.push({ role: 'user', content: userInput.value })
+  const query = userInput.value
   userInput.value = ''
-  nextTick(() => { chatScrollRef.value.scrollTop = chatScrollRef.value.scrollHeight })
+  try {
+    const matched = await searchCaseByText(query)
+    if (!matched) {
+      messages.value.push({ role: 'ai', content: '当前没有可研判案件，请先在异构数据接入页导入并处理数据。' })
+      return
+    }
+    await runCaseAnalysis(matched.id, query)
+  } catch (error) {
+    messages.value.push({ role: 'ai', content: `研判请求失败：${error.message}` })
+  }
+}
+
+const applyShortcut = (text) => {
+  userInput.value = text
 }
 
 onMounted(() => {
   initGraph()
+  loadHistoryCases()
   window.addEventListener('resize', () => graphIns?.resize())
 })
 </script>
@@ -256,6 +371,7 @@ onMounted(() => {
 .input-wrapper input::placeholder { color: #999; }
 .input-wrapper button { background: #122E8A; color: #FFFFFF; border: none; padding: 8px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 14px; }
 .input-wrapper button:hover { background: #0D226A; box-shadow: 0 2px 8px rgba(18, 46, 138, 0.3); }
+.input-wrapper button:disabled { opacity: 0.62; cursor: not-allowed; box-shadow: none; }
 .input-shortcuts { display: flex; gap: 15px; margin-top: 12px; font-size: 12px; color: #666; font-weight: bold; }
 .input-shortcuts span { cursor: pointer; padding: 4px 8px; border-radius: 4px; transition: 0.2s; }
 .input-shortcuts span:hover { background: rgba(18, 46, 138, 0.05); color: #122E8A; }

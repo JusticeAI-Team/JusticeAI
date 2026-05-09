@@ -5,7 +5,28 @@ use uuid::Uuid;
 pub async fn initialize_workspace_schema(db: &PgPool) -> Result<(), sqlx::Error> {
     db.execute(include_str!("../sql/init_workspace_tables.sql"))
         .await?;
+    recover_interrupted_platform_jobs(db).await?;
     seed_workspace_data(db).await?;
+    Ok(())
+}
+
+async fn recover_interrupted_platform_jobs(db: &PgPool) -> Result<(), sqlx::Error> {
+    let now = Utc::now();
+    sqlx::query(
+        r#"
+        UPDATE platform_jobs
+        SET status = 'failed',
+            progress_percent = CASE WHEN progress_percent >= 100 THEN 99 ELSE progress_percent END,
+            message = 'backend restarted before this in-process job completed',
+            error_message = COALESCE(error_message, 'job was interrupted by backend restart and must be retried'),
+            finished_at = COALESCE(finished_at, $1),
+            updated_at = $1
+        WHERE status IN ('queued', 'running')
+        "#,
+    )
+    .bind(now)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
