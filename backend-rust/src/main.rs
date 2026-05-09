@@ -51,9 +51,7 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .context("解析监听地址失败")?;
 
-    let listener = TcpListener::bind(addr)
-        .await
-        .context("绑定监听地址失败")?;
+    let listener = TcpListener::bind(addr).await.context("绑定监听地址失败")?;
 
     info!(listen = %addr, "JusticeAI 后端已启动");
 
@@ -94,8 +92,8 @@ fn create_dir_if_missing(path: &str) -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    let env_filter = std::env::var("RUST_LOG")
-        .unwrap_or_else(|_| "info,sqlx=warn,tower_http=info".to_string());
+    let env_filter =
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "info,sqlx=warn,tower_http=info".to_string());
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)

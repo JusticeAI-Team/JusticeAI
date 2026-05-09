@@ -90,11 +90,13 @@ impl OpenAiCompatibleEmbeddingService {
         let status = response.status();
         let raw_body = response.text().await.map_err(|error| error.to_string())?;
         if !status.is_success() {
-            return Err(format!("embedding request failed with status {status}: {raw_body}"));
+            return Err(format!(
+                "embedding request failed with status {status}: {raw_body}"
+            ));
         }
 
-        let parsed: EmbeddingResponse =
-            serde_json::from_str(&raw_body).map_err(|error| format!("invalid embedding response: {error}: {raw_body}"))?;
+        let parsed: EmbeddingResponse = serde_json::from_str(&raw_body)
+            .map_err(|error| format!("invalid embedding response: {error}: {raw_body}"))?;
         if parsed.data.is_empty() {
             return Err("embedding service returned empty data".to_string());
         }

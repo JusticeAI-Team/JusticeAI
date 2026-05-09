@@ -218,6 +218,32 @@ CREATE INDEX IF NOT EXISTS idx_platform_settings_category
 CREATE INDEX IF NOT EXISTS idx_platform_settings_key
     ON platform_settings (setting_key);
 
+CREATE TABLE IF NOT EXISTS platform_jobs (
+    id UUID PRIMARY KEY,
+    job_type TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id UUID,
+    status TEXT NOT NULL,
+    progress_percent INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    request_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    error_message TEXT,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_platform_jobs_type_status
+    ON platform_jobs (job_type, status);
+
+CREATE INDEX IF NOT EXISTS idx_platform_jobs_target
+    ON platform_jobs (target_type, target_id);
+
+CREATE INDEX IF NOT EXISTS idx_platform_jobs_created_at
+    ON platform_jobs (created_at DESC);
+
 ALTER TABLE imports
     ADD COLUMN IF NOT EXISTS source_label TEXT,
     ADD COLUMN IF NOT EXISTS error_message TEXT,
@@ -297,3 +323,8 @@ UPDATE extraction_runs SET
 UPDATE graph_relations SET confidence = COALESCE(confidence, 1.0);
 UPDATE mapping_templates SET is_active = COALESCE(is_active, FALSE);
 UPDATE mapping_fields SET required = COALESCE(required, FALSE);
+UPDATE platform_jobs SET
+    progress_percent = COALESCE(progress_percent, 0),
+    message = COALESCE(message, ''),
+    request_json = COALESCE(request_json, '{}'),
+    result_json = COALESCE(result_json, '{}');

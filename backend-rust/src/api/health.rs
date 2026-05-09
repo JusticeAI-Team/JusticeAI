@@ -29,6 +29,7 @@ struct DependencyStatuses {
     postgres: &'static str,
     hugegraph: &'static str,
     vllm: &'static str,
+    embedding: &'static str,
     milvus: &'static str,
 }
 
@@ -63,25 +64,44 @@ async fn health(State(state): State<AppState>) -> axum::Json<ApiResponse<HealthR
     let postgres_up = check_postgres(state.db()).await;
     let hugegraph_up = check_http_endpoint(
         &state,
-        format!("{}/", state.settings().hugegraph.base_url.trim_end_matches('/')),
+        format!(
+            "{}/",
+            state.settings().hugegraph.base_url.trim_end_matches('/')
+        ),
     )
     .await;
     let vllm_up = check_http_endpoint(
         &state,
-        format!("{}/models", state.settings().vllm.base_url.trim_end_matches('/')),
+        format!(
+            "{}/models",
+            state.settings().vllm.base_url.trim_end_matches('/')
+        ),
     )
     .await;
+    let embedding_up = check_embedding_endpoint(&state).await;
+    let milvus_up = check_milvus_endpoint(&state).await;
     let milvus_status = if state.settings().milvus.address.trim().is_empty() {
         "not_configured"
+    } else if milvus_up {
+        "up"
     } else {
-        "not_checked"
+        "down"
     };
 
     let postgres = if postgres_up { "up" } else { "down" };
     let hugegraph = if hugegraph_up { "up" } else { "down" };
     let vllm = if vllm_up { "up" } else { "down" };
+    let embedding = if state.settings().embedding.base_url.trim().is_empty()
+        || state.settings().embedding.model_name.trim().is_empty()
+    {
+        "not_configured"
+    } else if embedding_up {
+        "up"
+    } else {
+        "down"
+    };
 
-    let status = if postgres_up && hugegraph_up && vllm_up {
+    let status = if postgres_up && hugegraph_up && vllm_up && embedding_up && milvus_up {
         "ok"
     } else if postgres_up {
         "degraded"
@@ -105,6 +125,7 @@ async fn health(State(state): State<AppState>) -> axum::Json<ApiResponse<HealthR
             postgres,
             hugegraph,
             vllm,
+            embedding,
             milvus: milvus_status,
         },
         dependency_details: vec![
@@ -133,12 +154,20 @@ async fn health(State(state): State<AppState>) -> axum::Json<ApiResponse<HealthR
                 message: "model integration is expected to use an OpenAI-compatible ChatCompletion endpoint".to_string(),
             },
             DependencyDetail {
+                key: "embedding",
+                label: "Embedding/OpenAI-Compatible",
+                status: embedding,
+                endpoint: state.settings().embedding.base_url.clone(),
+                checked_at: checked_at.clone(),
+                message: "embedding integration is expected to use an OpenAI-compatible /embeddings endpoint".to_string(),
+            },
+            DependencyDetail {
                 key: "milvus",
                 label: "Milvus",
                 status: milvus_status,
                 endpoint: state.settings().milvus.address.clone(),
                 checked_at: checked_at.clone(),
-                message: "vector search remains a reserved integration point".to_string(),
+                message: "Milvus vector store is probed through the REST v2 collection endpoint".to_string(),
             },
         ],
         storage: vec![
@@ -149,7 +178,7 @@ async fn health(State(state): State<AppState>) -> axum::Json<ApiResponse<HealthR
         data_overview,
         notes: vec![
             "Health is intentionally structured for the platform readiness screen.".to_string(),
-            "Milvus probing remains placeholder until a concrete client is integrated.".to_string(),
+            "Milvus and Embedding are actively probed so the ops console can show real vector-chain readiness.".to_string(),
         ],
     })
 }
@@ -174,6 +203,76 @@ async fn check_http_endpoint(state: &AppState, url: String) -> bool {
                 || response.status().as_u16() == 404
         })
         .unwrap_or(false)
+}
+
+async fn check_embedding_endpoint(state: &AppState) -> bool {
+    if state.settings().embedding.base_url.trim().is_empty()
+        || state.settings().embedding.model_name.trim().is_empty()
+    {
+        return false;
+    }
+
+    let endpoint = if state.settings().embedding.endpoint.starts_with('/') {
+        state.settings().embedding.endpoint.clone()
+    } else {
+        format!("/{}", state.settings().embedding.endpoint)
+    };
+    let url = format!(
+        "{}{}",
+        state.settings().embedding.base_url.trim_end_matches('/'),
+        endpoint
+    );
+    let payload = serde_json::json!({
+        "model": state.settings().embedding.model_name,
+        "input": "JusticeAI health check"
+    });
+    let mut request = state.http_client().post(url).json(&payload);
+    if !state.settings().embedding.api_key.trim().is_empty() {
+        request = request.bearer_auth(state.settings().embedding.api_key.trim());
+    }
+
+    request
+        .send()
+        .await
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
+}
+
+async fn check_milvus_endpoint(state: &AppState) -> bool {
+    if state.settings().milvus.address.trim().is_empty() {
+        return false;
+    }
+
+    let url = format!(
+        "{}/v2/vectordb/collections/list",
+        state.settings().milvus.address.trim_end_matches('/')
+    );
+    let mut request = state.http_client().post(url).json(&serde_json::json!({}));
+    if let Some(token) = resolve_milvus_token(state) {
+        request = request.bearer_auth(token);
+    }
+
+    request
+        .send()
+        .await
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
+}
+
+fn resolve_milvus_token(state: &AppState) -> Option<String> {
+    if !state.settings().milvus.token.trim().is_empty() {
+        Some(state.settings().milvus.token.trim().to_string())
+    } else if !state.settings().milvus.username.trim().is_empty()
+        && !state.settings().milvus.password.trim().is_empty()
+    {
+        Some(format!(
+            "{}:{}",
+            state.settings().milvus.username.trim(),
+            state.settings().milvus.password.trim()
+        ))
+    } else {
+        None
+    }
 }
 
 async fn scalar_count(db: &sqlx::PgPool, sql: &str) -> i64 {

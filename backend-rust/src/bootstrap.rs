@@ -3,7 +3,8 @@ use sqlx::{Executor, PgPool};
 use uuid::Uuid;
 
 pub async fn initialize_workspace_schema(db: &PgPool) -> Result<(), sqlx::Error> {
-    db.execute(include_str!("../sql/init_workspace_tables.sql")).await?;
+    db.execute(include_str!("../sql/init_workspace_tables.sql"))
+        .await?;
     seed_workspace_data(db).await?;
     Ok(())
 }
@@ -51,9 +52,30 @@ async fn seed_mapping_templates(db: &PgPool) -> Result<(), sqlx::Error> {
     .await?;
 
     let fields = [
-        ("诉求标题", "case_title", 0.98_f64, "mapped", "某小区物业纠纷持续升级", 1_i32),
-        ("发生街道", "area_name", 0.93_f64, "mapped", "广安门内街道", 2_i32),
-        ("责任部门", "department_name", 0.87_f64, "needs_review", "某街道办", 3_i32),
+        (
+            "诉求标题",
+            "case_title",
+            0.98_f64,
+            "mapped",
+            "某小区物业纠纷持续升级",
+            1_i32,
+        ),
+        (
+            "发生街道",
+            "area_name",
+            0.93_f64,
+            "mapped",
+            "广安门内街道",
+            2_i32,
+        ),
+        (
+            "责任部门",
+            "department_name",
+            0.87_f64,
+            "needs_review",
+            "某街道办",
+            3_i32,
+        ),
     ];
 
     for (source_field, target_field, confidence, status, sample_value, sort_order) in fields {
@@ -98,9 +120,15 @@ async fn seed_workflow_runs(db: &PgPool) -> Result<(), sqlx::Error> {
         ("reports", "报告生成", "draft", 8, 6, 2, 2),
     ];
 
-    for (stage_key, stage_label, status, item_count, success_count, failure_count, hours_ago) in stages {
+    for (stage_key, stage_label, status, item_count, success_count, failure_count, hours_ago) in
+        stages
+    {
         let started_at = now - Duration::hours(hours_ago);
-        let finished_at = if status == "completed" { Some(now - Duration::hours(1)) } else { None };
+        let finished_at = if status == "completed" {
+            Some(now - Duration::hours(1))
+        } else {
+            None
+        };
 
         sqlx::query(
             r#"
@@ -232,8 +260,15 @@ async fn seed_risk_cases(db: &PgPool) -> Result<(), sqlx::Error> {
         .bind(now - Duration::days(10))
         .bind(now)
         .bind(format!("Seeded summary for {}", row.1))
-        .bind("Verify recurrence, coordinate disposal, and keep weekly supervision updates.".to_string())
-        .bind(if row.4 == "high" { "manual_review_required" } else { "pending" })
+        .bind(
+            "Verify recurrence, coordinate disposal, and keep weekly supervision updates."
+                .to_string(),
+        )
+        .bind(if row.4 == "high" {
+            "manual_review_required"
+        } else {
+            "pending"
+        })
         .bind(format!("{},level:{}", row.2, row.4))
         .execute(db)
         .await?;
@@ -248,9 +283,11 @@ async fn seed_knowledge_entities(db: &PgPool) -> Result<(), sqlx::Error> {
         return Ok(());
     }
 
-    let cases = sqlx::query_as::<_, (Uuid, String)>("SELECT id, case_code FROM risk_cases ORDER BY created_at ASC")
-        .fetch_all(db)
-        .await?;
+    let cases = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, case_code FROM risk_cases ORDER BY created_at ASC",
+    )
+    .fetch_all(db)
+    .await?;
 
     let now = Utc::now();
 
@@ -333,8 +370,24 @@ async fn seed_generated_reports(db: &PgPool) -> Result<(), sqlx::Error> {
 
     let now = Utc::now();
     let reports = [
-        ("西城区基层治理风险周报", "weekly_risk", "2026-W16", "ready", Some("runtime/reports/weekly-risk-w16.pdf"), "已生成周报摘要占位内容", now - Duration::hours(12)),
-        ("重点领域预警处置月报", "monthly_disposal", "2026-04", "draft", None, "待生成 AI 总结与处置分析", now - Duration::hours(4)),
+        (
+            "西城区基层治理风险周报",
+            "weekly_risk",
+            "2026-W16",
+            "ready",
+            Some("runtime/reports/weekly-risk-w16.pdf"),
+            "已生成周报摘要占位内容",
+            now - Duration::hours(12),
+        ),
+        (
+            "重点领域预警处置月报",
+            "monthly_disposal",
+            "2026-04",
+            "draft",
+            None,
+            "待生成 AI 总结与处置分析",
+            now - Duration::hours(4),
+        ),
     ];
 
     for (title, report_type, period, status, file_path, summary, generated_at) in reports {
@@ -373,11 +426,42 @@ async fn seed_extraction_runs(db: &PgPool) -> Result<(), sqlx::Error> {
 
     let now = Utc::now();
     let runs = [
-        ("all_recent_cases", "incremental", "completed", 12_i32, 12_i32, 0_i32, Some("最近案件已完成规则抽取，待接入模型增强"), now - Duration::hours(10), Some(now - Duration::hours(9))),
-        ("selected_cases", "full", "failed", 3_i32, 2_i32, 1_i32, Some("1 条案件文本缺失，需补录后重试"), now - Duration::hours(5), Some(now - Duration::hours(4))),
+        (
+            "all_recent_cases",
+            "incremental",
+            "completed",
+            12_i32,
+            12_i32,
+            0_i32,
+            Some("最近案件已完成规则抽取，待接入模型增强"),
+            now - Duration::hours(10),
+            Some(now - Duration::hours(9)),
+        ),
+        (
+            "selected_cases",
+            "full",
+            "failed",
+            3_i32,
+            2_i32,
+            1_i32,
+            Some("1 条案件文本缺失，需补录后重试"),
+            now - Duration::hours(5),
+            Some(now - Duration::hours(4)),
+        ),
     ];
 
-    for (scope_type, mode, status, item_count, success_count, failure_count, summary, started_at, finished_at) in runs {
+    for (
+        scope_type,
+        mode,
+        status,
+        item_count,
+        success_count,
+        failure_count,
+        summary,
+        started_at,
+        finished_at,
+    ) in runs
+    {
         sqlx::query(
             r#"
             INSERT INTO extraction_runs (
@@ -420,8 +504,18 @@ async fn seed_alerts(db: &PgPool) -> Result<(), sqlx::Error> {
 
     let now = Utc::now();
     for (index, (case_id, title, risk_level)) in cases.into_iter().enumerate() {
-        let severity = if risk_level == "high" { "high" } else { "medium" };
-        let status = if index == 0 { "open" } else if index == 1 { "acknowledged" } else { "closed" };
+        let severity = if risk_level == "high" {
+            "high"
+        } else {
+            "medium"
+        };
+        let status = if index == 0 {
+            "open"
+        } else if index == 1 {
+            "acknowledged"
+        } else {
+            "closed"
+        };
         sqlx::query(
             r#"
             INSERT INTO alerts (
@@ -438,7 +532,10 @@ async fn seed_alerts(db: &PgPool) -> Result<(), sqlx::Error> {
         .bind(format!("预警-{}", title))
         .bind(severity)
         .bind(status)
-        .bind(format!("案件『{}』触发{}级预警，当前为平台占位摘要。", title, severity))
+        .bind(format!(
+            "案件『{}』触发{}级预警，当前为平台占位摘要。",
+            title, severity
+        ))
         .bind(now - Duration::hours((index as i64 + 1) * 2))
         .execute(db)
         .await?;
@@ -481,11 +578,22 @@ async fn seed_dispatch_tasks(db: &PgPool) -> Result<(), sqlx::Error> {
         .bind(assignee.unwrap_or_else(|| "待分派".to_string()))
         .bind(if index == 0 { "high" } else { "medium" })
         .bind(status)
-        .bind(Some(format!("任务状态为 {}，用于前端协同处置页占位展示", status)))
+        .bind(Some(format!(
+            "任务状态为 {}，用于前端协同处置页占位展示",
+            status
+        )))
         .bind(due_at)
-        .bind(if status == "completed" { Some(now - Duration::days(1)) } else { None })
+        .bind(if status == "completed" {
+            Some(now - Duration::days(1))
+        } else {
+            None
+        })
         .bind(now - Duration::hours((index as i64 + 1) * 3))
-        .bind(if status == "completed" { Some("closed-loop feedback recorded".to_string()) } else { None })
+        .bind(if status == "completed" {
+            Some("closed-loop feedback recorded".to_string())
+        } else {
+            None
+        })
         .execute(db)
         .await?;
     }
@@ -506,13 +614,25 @@ async fn seed_platform_settings(db: &PgPool) -> Result<(), sqlx::Error> {
         ("platform", "upload_dir", "runtime/uploads"),
         ("platform", "report_dir", "runtime/reports"),
         ("platform", "training_dir", "runtime/training"),
-        ("integrations", "hugegraph_base_url", "http://localhost:8080"),
-        ("integrations", "hugegraph_gremlin_url", "ws://localhost:8182/gremlin"),
+        (
+            "integrations",
+            "hugegraph_base_url",
+            "http://localhost:8080",
+        ),
+        (
+            "integrations",
+            "hugegraph_gremlin_url",
+            "ws://localhost:8182/gremlin",
+        ),
         ("integrations", "milvus_address", "http://localhost:19530"),
         ("integrations", "model_base_url", "http://localhost:8000"),
         ("integrations", "model_name", "justiceai-placeholder"),
-        ("integrations", "model_request_style", "openai_chat_completion_compatible"),
-        ("integrations", "model_chat_endpoint", "/v1/chat/completions"),
+        (
+            "integrations",
+            "model_request_style",
+            "openai_chat_completion_compatible",
+        ),
+        ("integrations", "model_chat_endpoint", "/chat/completions"),
         ("integrations", "model_json_mode_supported", "true"),
         ("integrations", "model_api_key_configured", "false"),
     ];

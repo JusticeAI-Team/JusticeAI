@@ -173,7 +173,10 @@ impl HugeGraphSyncService {
     async fn drop_case_graph(&self, input: &GraphCaseSyncInput) -> Result<(), String> {
         for entity in &input.entities {
             let _ = self
-                .delete_graph_path("vertices", &entity_vertex_id(&input.case_id, &entity.entity_name))
+                .delete_graph_path(
+                    "vertices",
+                    &entity_vertex_id(&input.case_id, &entity.entity_name),
+                )
                 .await;
         }
         let _ = self
@@ -284,7 +287,8 @@ impl HugeGraphSyncService {
         )
         .await
         .or_else(|error| {
-            if error.contains("existed") || error.contains("already") || error.contains("Conflict") {
+            if error.contains("existed") || error.contains("already") || error.contains("Conflict")
+            {
                 Ok(json!({ "status": "exists" }))
             } else {
                 Err(error)
@@ -330,9 +334,12 @@ impl HugeGraphSyncService {
         let status = response.status();
         let body = response.text().await.map_err(|error| error.to_string())?;
         if !status.is_success() {
-            return Err(format!("HugeGraph request failed with status {status}: {body}"));
+            return Err(format!(
+                "HugeGraph request failed with status {status}: {body}"
+            ));
         }
-        serde_json::from_str(&body).map_err(|error| format!("invalid HugeGraph response: {error}: {body}"))
+        serde_json::from_str(&body)
+            .map_err(|error| format!("invalid HugeGraph response: {error}: {body}"))
     }
 }
 

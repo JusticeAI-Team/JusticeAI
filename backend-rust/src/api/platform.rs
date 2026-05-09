@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fs};
 
 use axum::{
     extract::{Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -15,10 +15,10 @@ use crate::{
     services::{
         ai::{
             ModelContract as AiModelContract, OpenAiCompatibleAiService, RecommendationInput,
-            ReportInput,
+            RecommendationOutput, ReportInput,
         },
         embedding::{EmbeddingContract, OpenAiCompatibleEmbeddingService},
-        graph::HugeGraphSyncService,
+        graph::{GraphCaseSyncInput, GraphEntitySync, GraphRelationSync, HugeGraphSyncService},
         pipeline::{execute_extraction_run, process_import_batch},
         vector::{MilvusVectorStore, SimilarCaseHit},
     },
@@ -33,15 +33,26 @@ pub fn routes() -> Router<AppState> {
         .route("/dashboard/overview", get(dashboard_overview))
         .route("/dashboard/summary", get(dashboard_summary))
         .route("/dashboard/stages", get(stage_summary))
+        .route("/demo/full-flow", post(run_demo_full_flow))
         .route("/ingestion/summary", get(ingestion_summary_view))
         .route("/ingestion/batches", get(ingestion_batches))
         .route("/ingestion/list", get(ingestion_list))
         .route("/ingestion/:id", get(ingestion_detail))
-        .route("/ingestion/:id/process", post(process_ingestion_action_live))
+        .route(
+            "/ingestion/:id/process",
+            post(process_ingestion_action_live),
+        )
+        .route(
+            "/ingestion/:id/process/async",
+            post(start_ingestion_processing_job),
+        )
         .route("/imports/:id/process", post(process_ingestion_action_live))
         .route("/mapping/summary", get(mapping_summary))
         .route("/mapping/current", get(mapping_current))
-        .route("/mapping/templates", get(mapping_templates).post(save_mapping_template))
+        .route(
+            "/mapping/templates",
+            get(mapping_templates).post(save_mapping_template),
+        )
         .route("/mapping/templates/:id", get(mapping_template_detail))
         .route("/mapping/validate", post(validate_mapping))
         .route("/processing/summary", get(processing_summary))
@@ -52,6 +63,7 @@ pub fn routes() -> Router<AppState> {
         .route("/extraction/runs", get(extraction_runs))
         .route("/extraction/runs/:id", get(extraction_run_detail))
         .route("/extraction/run", post(create_extraction_run_live))
+        .route("/extraction/run/async", post(start_extraction_job))
         .route("/graph/summary", get(graph_summary))
         .route("/graph/overview", get(graph_overview))
         .route("/graph/cases/:id", get(graph_case_view))
@@ -66,7 +78,10 @@ pub fn routes() -> Router<AppState> {
         .route("/alerts/:id", get(alert_detail))
         .route("/alerts/:id/status", post(update_alert_status))
         .route("/dispatch/summary", get(dispatch_summary))
-        .route("/dispatch/tasks", get(dispatch_list).post(create_dispatch_task))
+        .route(
+            "/dispatch/tasks",
+            get(dispatch_list).post(create_dispatch_task),
+        )
         .route("/dispatch/tasks/:id", get(dispatch_detail))
         .route("/dispatch/tasks/:id/status", post(update_dispatch_status))
         .route("/evaluation/summary", get(evaluation_summary_view))
@@ -74,9 +89,12 @@ pub fn routes() -> Router<AppState> {
         .route("/supervision/overview", get(supervision_overview))
         .route("/supervision/summary", get(supervision_summary))
         .route("/supervision/failures", get(supervision_failures))
+        .route("/jobs", get(job_list))
+        .route("/jobs/:id", get(job_detail))
         .route("/reports/summary", get(report_summary))
         .route("/reports", get(report_list).post(create_report_live))
         .route("/reports/generate", post(create_report_live))
+        .route("/reports/generate/async", post(start_report_job))
         .route("/reports/:id", get(report_detail))
         .route("/reports/:id/regenerate", post(regenerate_report))
         .route(
@@ -188,6 +206,43 @@ struct ActionResponse {
     is_placeholder: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct JobDto {
+    id: String,
+    job_type: String,
+    target_type: String,
+    target_id: Option<String>,
+    status: String,
+    progress_percent: i32,
+    message: String,
+    request: serde_json::Value,
+    result: serde_json::Value,
+    error_message: Option<String>,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, FromRow)]
+struct JobRow {
+    id: Uuid,
+    job_type: String,
+    target_type: String,
+    target_id: Option<Uuid>,
+    status: String,
+    progress_percent: i32,
+    message: String,
+    request_json: String,
+    result_json: String,
+    error_message: Option<String>,
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PaginationQuery {
     page: Option<i64>,
@@ -196,6 +251,15 @@ struct PaginationQuery {
     source_type: Option<String>,
     area_name: Option<String>,
     risk_level: Option<String>,
+    import_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JobQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    status: Option<String>,
+    job_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,7 +296,7 @@ struct UpdateStatusRequest {
     status: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct CreateExtractionRunRequest {
     case_ids: Option<Vec<Uuid>>,
@@ -249,7 +313,7 @@ struct CreateDispatchTaskRequest {
     due_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct CreateReportRequest {
     report_type: String,
@@ -292,11 +356,14 @@ struct SaveIntegrationsSettingsRequest {
 struct TestIntegrationsRequest {
     hugegraph_base_url: Option<String>,
     milvus_address: Option<String>,
+    milvus_token: Option<String>,
     model_base_url: Option<String>,
     model_name: Option<String>,
+    model_chat_endpoint: Option<String>,
     openai_api_key: Option<String>,
     embedding_base_url: Option<String>,
     embedding_model: Option<String>,
+    embedding_endpoint: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -702,6 +769,31 @@ struct GraphRelationView {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, FromRow)]
+struct GraphCaseSyncRow {
+    id: Uuid,
+    case_code: String,
+    title: String,
+    area_name: String,
+    risk_level: String,
+    source_type: String,
+}
+
+#[derive(Debug, FromRow)]
+struct GraphEntitySyncRow {
+    entity_type: String,
+    entity_name: String,
+    confidence: f64,
+}
+
+#[derive(Debug, FromRow)]
+struct GraphRelationSyncRow {
+    relation_type: String,
+    source_entity_name: String,
+    target_entity_name: String,
+    confidence: f64,
+}
+
 #[derive(Debug, Serialize, FromRow)]
 #[serde(rename_all = "snake_case")]
 struct AlertView {
@@ -884,6 +976,14 @@ struct ReportListItem {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct ReportDetailItem {
+    #[serde(flatten)]
+    report: ReportListItem,
+    content_markdown: Option<String>,
+}
+
 #[derive(Debug, Serialize, FromRow)]
 #[serde(rename_all = "snake_case")]
 struct PlatformSettingRow {
@@ -967,12 +1067,755 @@ struct IntegrationTestResponse {
     embedding_service: ModelIntegrationStatus,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct DemoFullFlowResponse {
+    generated_at: String,
+    demo_mode: bool,
+    import_id: String,
+    extraction_run_id: String,
+    report_id: String,
+    case_ids: Vec<String>,
+    stages: Vec<DemoStage>,
+    metrics: Vec<MetricCard>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct DemoStage {
+    key: String,
+    label: String,
+    status: String,
+    detail: String,
+    count: i32,
+}
+
+struct DemoCaseSeed {
+    case_code: &'static str,
+    title: &'static str,
+    source_type: &'static str,
+    area_name: &'static str,
+    risk_level: &'static str,
+    risk_score: f64,
+    status: &'static str,
+    alert_status: &'static str,
+    assignee: &'static str,
+    risk_tags: &'static str,
+    reason: &'static str,
+    advice: &'static str,
+    entity_names: [&'static str; 3],
+}
+
+async fn run_demo_full_flow(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<DemoFullFlowResponse>>, AppError> {
+    let now_at = Utc::now();
+    let import_id = Uuid::new_v4();
+    let extraction_run_id = Uuid::new_v4();
+    let report_id = Uuid::new_v4();
+    let mapping_template_id = Uuid::new_v4();
+    let demo_cases = demo_case_seeds();
+
+    reset_demo_full_flow_data(state.db()).await?;
+    upsert_demo_mapping_template(state.db(), mapping_template_id, now_at).await?;
+    insert_demo_import(
+        state.db(),
+        import_id,
+        mapping_template_id,
+        demo_cases.len() as i32,
+        now_at,
+    )
+    .await?;
+    insert_demo_workflow_runs(state.db(), now_at).await?;
+
+    let mut case_ids = Vec::with_capacity(demo_cases.len());
+    let mut entity_count = 0_i32;
+    let mut relation_count = 0_i32;
+    for (index, seed) in demo_cases.iter().enumerate() {
+        let case_id = insert_demo_case(state.db(), import_id, seed, index as i64, now_at).await?;
+        let entity_ids = insert_demo_entities(state.db(), case_id, seed, now_at).await?;
+        insert_demo_relations(state.db(), &entity_ids, now_at).await?;
+        insert_demo_alert(state.db(), case_id, seed, index as i64, now_at).await?;
+        if matches!(seed.risk_level, "high" | "medium") {
+            insert_demo_dispatch_task(state.db(), case_id, seed, index as i64, now_at).await?;
+        }
+        entity_count += entity_ids.len() as i32;
+        relation_count += 2;
+        case_ids.push(case_id);
+    }
+
+    insert_demo_extraction_run(
+        state.db(),
+        extraction_run_id,
+        demo_cases.len() as i32,
+        entity_count,
+        relation_count,
+        now_at,
+    )
+    .await?;
+    insert_demo_report(&state, report_id, demo_cases.len() as i32, now_at).await?;
+
+    Ok(ok(DemoFullFlowResponse {
+        generated_at: now(),
+        demo_mode: true,
+        import_id: import_id.to_string(),
+        extraction_run_id: extraction_run_id.to_string(),
+        report_id: report_id.to_string(),
+        case_ids: case_ids.into_iter().map(|id| id.to_string()).collect(),
+        stages: vec![
+            demo_stage("readiness", "系统准备", "completed", "PostgreSQL、vLLM、HugeGraph、Embedding 状态可展示；Milvus 使用演示向量状态兜底。", 5),
+            demo_stage("ingestion", "数据导入", "completed", "已生成一批通州多源样例数据导入批次。", demo_cases.len() as i32),
+            demo_stage("mapping", "字段映射", "completed", "已生成 12345/110/信访/395 统一字段映射模板。", 8),
+            demo_stage("processing", "数据处理入库", "completed", "已转换为标准风险案件并写入风险原因、建议、标签。", demo_cases.len() as i32),
+            demo_stage("extraction", "知识抽取", "completed", "已生成演示实体和关系，供图谱页面展示。", entity_count),
+            demo_stage("graph_vector", "图谱/向量同步", "completed", "HugeGraph 标记 synced；Milvus 未就绪时使用 indexed_demo 明确演示兜底。", relation_count),
+            demo_stage("risk", "风险研判", "completed", "已覆盖高/中风险案件、处置建议和人工复核状态。", demo_cases.len() as i32),
+            demo_stage("alerts", "预警管理", "completed", "已生成预警记录，支持确认/关闭演示。", demo_cases.len() as i32),
+            demo_stage("dispatch", "任务分派", "completed", "已生成责任人、优先级、截止时间和进展记录。", 3),
+            demo_stage("report", "报告生成", "completed", "已生成一份基层治理风险研判演示报告。", 1),
+        ],
+        metrics: vec![
+            metric_card("demo_cases", "Demo Cases", demo_cases.len().to_string(), None, None, None, "healthy"),
+            metric_card("demo_entities", "Demo Entities", entity_count.to_string(), None, None, None, "healthy"),
+            metric_card("demo_relations", "Demo Relations", relation_count.to_string(), None, None, None, "healthy"),
+            metric_card("demo_report", "Demo Report", "1".to_string(), None, None, None, "healthy"),
+        ],
+        notes: vec![
+            "这是演示闭环数据，会清理并重建 DEMO-TZ-* 案件，不影响真实导入批次。".to_string(),
+            "Milvus 未运行时向量状态使用 indexed_demo，页面可展示完整闭环，但运维页仍会真实显示 Milvus down。".to_string(),
+            "后续 OCR/Milvus 修复后，可把 demo fallback 替换成真实外部同步结果。".to_string(),
+        ],
+    }))
+}
+
+fn demo_stage(key: &str, label: &str, status: &str, detail: &str, count: i32) -> DemoStage {
+    DemoStage {
+        key: key.to_string(),
+        label: label.to_string(),
+        status: status.to_string(),
+        detail: detail.to_string(),
+        count,
+    }
+}
+
+fn demo_case_seeds() -> Vec<DemoCaseSeed> {
+    vec![
+        DemoCaseSeed {
+            case_code: "DEMO-TZ-2026-0001",
+            title: "12345 食品安全投诉触发商户合规风险",
+            source_type: "hotline_12345",
+            area_name: "九棵树街道",
+            risk_level: "medium",
+            risk_score: 78.6,
+            status: "disposed",
+            alert_status: "acknowledged",
+            assignee: "市场监管联络员",
+            risk_tags: "食品安全,12345热线,消费投诉,商户监管",
+            reason: "多次投诉指向同一餐饮门店，涉及食品异物、沟通态度和行政调解诉求，存在监管复核和舆情扩散风险。",
+            advice: "联动市场监管所复核商户进货票据、消杀记录和现场整改情况 | 对同主体历史诉求做相似案件回溯 | 对答复不满意情形安排二次回访",
+            entity_names: ["源麦甜(通州店)", "九棵树街道", "食品安全投诉"],
+        },
+        DemoCaseSeed {
+            case_code: "DEMO-TZ-2026-0002",
+            title: "110 接警信息关联工地劳资纠纷升级",
+            source_type: "police_110",
+            area_name: "马驹桥镇",
+            risk_level: "high",
+            risk_score: 91.2,
+            status: "in_progress",
+            alert_status: "open",
+            assignee: "马驹桥镇综治办",
+            risk_tags: "110警情,劳资欠薪,群体性风险,施工项目",
+            reason: "接警内容与 12345 欠薪诉求、395 平台项目人员数据形成交叉印证，存在聚集讨薪和现场冲突风险。",
+            advice: "立即核实总包和分包责任链 | 建立欠薪人员清单和工资支付台账 | 检察建议前置介入并同步属地公安维持现场秩序",
+            entity_names: ["华丰建设项目", "马驹桥镇", "欠薪警情"],
+        },
+        DemoCaseSeed {
+            case_code: "DEMO-TZ-2026-0003",
+            title: "区综治信访重复反映土地补偿争议",
+            source_type: "petitions",
+            area_name: "潞城镇",
+            risk_level: "medium",
+            risk_score: 74.4,
+            status: "pending_review",
+            alert_status: "open",
+            assignee: "区综治中心",
+            risk_tags: "信访事项,土地补偿,重复访,历史遗留",
+            reason: "信访人长期反映土地补偿和历史裁判问题，诉求跨度长、材料复杂，存在重复访和多部门流转低效风险。",
+            advice: "梳理历史办理和裁判节点 | 明确属地、法院、行政机关责任边界 | 形成一次性告知与司法救助可行性评估",
+            entity_names: ["潞城镇三元村", "土地补偿争议", "区综治中心"],
+        },
+        DemoCaseSeed {
+            case_code: "DEMO-TZ-2026-0004",
+            title: "区检察院信访反映民事裁判监督线索",
+            source_type: "procuratorate_petition",
+            area_name: "新华街道",
+            risk_level: "medium",
+            risk_score: 76.8,
+            status: "pending_review",
+            alert_status: "acknowledged",
+            assignee: "民事检察部门",
+            risk_tags: "民事检察,裁判监督,来信来访,程序审查",
+            reason: "来信材料指向民事裁判监督和程序性异议，需要进行案件来源、裁判文书和当事人诉求聚合审查。",
+            advice: "调取原案卷宗和裁判文书 | 校验是否符合监督受理条件 | 对不符合条件的事项生成释法说理答复要点",
+            entity_names: ["北京市通州区人民检察院", "民事裁判监督线索", "新华街道"],
+        },
+        DemoCaseSeed {
+            case_code: "DEMO-TZ-2026-0005",
+            title: "395 平台项目人员数据提示欠薪企业风险",
+            source_type: "platform_395",
+            area_name: "台湖镇",
+            risk_level: "high",
+            risk_score: 88.9,
+            status: "in_progress",
+            alert_status: "open",
+            assignee: "住建联络员",
+            risk_tags: "395平台,工程建设,总包责任,工资支付",
+            reason: "项目人员进退场、企业编码和总包信息与欠薪诉求高度相关，存在总包履责不到位和工程款链条风险。",
+            advice: "核对实名制平台人员和工资专户流水 | 锁定总包联系人并要求限期反馈 | 对同企业历史项目进行图谱扩展排查",
+            entity_names: ["北京华鼎新铭智能科技发展有限公司", "台湖镇项目", "总包工资责任"],
+        },
+    ]
+}
+
+async fn reset_demo_full_flow_data(db: &sqlx::PgPool) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        DELETE FROM graph_relations
+        WHERE source_entity_id IN (
+            SELECT ke.id FROM knowledge_entities ke
+            JOIN risk_cases rc ON rc.id = ke.case_id
+            WHERE rc.case_code LIKE 'DEMO-TZ-%'
+        )
+        OR target_entity_id IN (
+            SELECT ke.id FROM knowledge_entities ke
+            JOIN risk_cases rc ON rc.id = ke.case_id
+            WHERE rc.case_code LIKE 'DEMO-TZ-%'
+        )
+        "#,
+    )
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    sqlx::query("DELETE FROM knowledge_entities WHERE case_id IN (SELECT id FROM risk_cases WHERE case_code LIKE 'DEMO-TZ-%')")
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    sqlx::query("DELETE FROM dispatch_tasks WHERE case_id IN (SELECT id FROM risk_cases WHERE case_code LIKE 'DEMO-TZ-%')")
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    sqlx::query("DELETE FROM alerts WHERE case_id IN (SELECT id FROM risk_cases WHERE case_code LIKE 'DEMO-TZ-%')")
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    sqlx::query("DELETE FROM risk_cases WHERE case_code LIKE 'DEMO-TZ-%'")
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    sqlx::query("DELETE FROM generated_reports WHERE report_type = 'demo_full_flow'")
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    sqlx::query("DELETE FROM extraction_runs WHERE scope_type = 'demo_full_flow'")
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    sqlx::query("DELETE FROM workflow_runs WHERE stage_key LIKE 'demo_%'")
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    sqlx::query(
+        "DELETE FROM import_files WHERE import_id IN (SELECT id FROM imports WHERE source_type = 'demo_full_flow')",
+    )
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    sqlx::query("DELETE FROM imports WHERE source_type = 'demo_full_flow'")
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+async fn upsert_demo_mapping_template(
+    db: &sqlx::PgPool,
+    template_id: Uuid,
+    now_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO mapping_templates (
+            id, template_key, template_label, version, status, source_type, is_active, created_at, updated_at
+        )
+        VALUES ($1, 'demo_full_flow_mapping', '通州多源治理数据 Demo 映射模板', '2026.demo', 'published', 'demo_full_flow', TRUE, $2, $2)
+        ON CONFLICT (template_key)
+        DO UPDATE SET
+            template_label = EXCLUDED.template_label,
+            version = EXCLUDED.version,
+            status = EXCLUDED.status,
+            source_type = EXCLUDED.source_type,
+            is_active = TRUE,
+            updated_at = EXCLUDED.updated_at
+        "#,
+    )
+    .bind(template_id)
+    .bind(now_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    let actual_template_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM mapping_templates WHERE template_key = 'demo_full_flow_mapping'",
+    )
+    .fetch_one(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    sqlx::query("DELETE FROM mapping_fields WHERE template_id = $1")
+        .bind(actual_template_id)
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+
+    for (sort_order, (source_field, target_field, sample_value, required)) in [
+        (
+            "工单标题/事项内容/详情",
+            "title",
+            "欠薪、食品安全、裁判监督等问题标题",
+            true,
+        ),
+        (
+            "所在街道/区县/通讯地址",
+            "area_name",
+            "马驹桥镇/九棵树街道/台湖镇",
+            true,
+        ),
+        (
+            "创建时间/来访日期/接报时间",
+            "occurred_at",
+            "2026-04-08 09:30:00",
+            true,
+        ),
+        (
+            "工单来源/分页名称",
+            "source_type",
+            "hotline_12345 / police_110 / platform_395",
+            true,
+        ),
+        (
+            "市级问题分类/事项分类",
+            "risk_tags",
+            "食品安全,劳资欠薪,民事检察",
+            false,
+        ),
+        ("工单状态/办理情况", "status", "已结案/办理中/待复核", false),
+        (
+            "承办单位/流转单位/总包名称",
+            "assignee",
+            "属地街镇/业务部门/总包单位",
+            false,
+        ),
+        (
+            "主要内容/内容摘要/反映内容",
+            "risk_reason_summary",
+            "诉求摘要和风险原因",
+            false,
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        sqlx::query(
+            r#"
+            INSERT INTO mapping_fields (
+                id, template_id, source_field, target_field, confidence, status,
+                sample_value, sort_order, required, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, 'mapped', $6, $7, $8, $9, $9)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(actual_template_id)
+        .bind(source_field)
+        .bind(target_field)
+        .bind(0.96_f64)
+        .bind(sample_value)
+        .bind(sort_order as i32)
+        .bind(*required)
+        .bind(now_at)
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    }
+
+    Ok(())
+}
+
+async fn insert_demo_import(
+    db: &sqlx::PgPool,
+    import_id: Uuid,
+    mapping_template_id: Uuid,
+    total_count: i32,
+    now_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO imports (
+            id, source_type, source_label, status, error_message, mapping_template_id,
+            total_record_count, processed_record_count, failed_record_count,
+            last_processed_at, created_at, updated_at
+        )
+        VALUES (
+            $1, 'demo_full_flow', 'Demo 全流程多源数据包', 'processed', '',
+            (SELECT id FROM mapping_templates WHERE template_key = 'demo_full_flow_mapping'),
+            $2, $2, 0, $3, $3, $3
+        )
+        "#,
+    )
+    .bind(import_id)
+    .bind(total_count)
+    .bind(now_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO import_files (
+            id, import_id, original_filename, stored_filename, stored_path,
+            file_size, mime_type, created_at
+        )
+        VALUES ($1, $2, 'demo-full-flow-通州多源治理样例.xlsx', 'demo-full-flow.xlsx', 'demo/demo-full-flow.xlsx', 204800, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', $3)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(import_id)
+    .bind(now_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    let _ = mapping_template_id;
+    Ok(())
+}
+
+async fn insert_demo_workflow_runs(
+    db: &sqlx::PgPool,
+    now_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    for (offset, stage_key, stage_label, item_count) in [
+        (0_i64, "demo_readiness", "Demo 系统准备", 5_i32),
+        (1, "demo_ingestion", "Demo 数据导入", 5),
+        (2, "demo_mapping", "Demo 字段映射", 8),
+        (3, "demo_processing", "Demo 数据处理入库", 5),
+        (4, "demo_extraction", "Demo 知识抽取", 15),
+        (5, "demo_graph_vector", "Demo 图谱/向量同步", 10),
+        (6, "demo_risk", "Demo 风险研判", 5),
+        (7, "demo_alert_dispatch", "Demo 预警与分派", 8),
+        (8, "demo_evaluation", "Demo 效果评估", 4),
+        (9, "demo_report", "Demo 报告生成", 1),
+    ] {
+        let started_at = now_at + Duration::seconds(offset * 2);
+        let finished_at = started_at + Duration::seconds(1);
+        sqlx::query(
+            r#"
+            INSERT INTO workflow_runs (
+                id, stage_key, stage_label, status, started_at, finished_at,
+                item_count, success_count, failure_count, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, 'completed', $4, $5, $6, $6, 0, $4, $5)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(stage_key)
+        .bind(stage_label)
+        .bind(started_at)
+        .bind(finished_at)
+        .bind(item_count)
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    }
+    Ok(())
+}
+
+async fn insert_demo_case(
+    db: &sqlx::PgPool,
+    import_id: Uuid,
+    seed: &DemoCaseSeed,
+    index: i64,
+    now_at: DateTime<Utc>,
+) -> Result<Uuid, AppError> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO risk_cases (
+            id, import_id, case_code, title, source_type, area_name,
+            risk_level, risk_score, status, alert_status, assignee,
+            occurred_at, due_at, closed_at, report_period, created_at, updated_at,
+            risk_reason_summary, disposal_advice, review_status, risk_tags,
+            graph_sync_status, graph_sync_message, graph_synced_at,
+            vector_sync_status, vector_sync_message, vector_synced_at
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $9, $10, $11,
+            $12, $13, CASE WHEN $9 IN ('closed', 'disposed') THEN $14 ELSE NULL END, '2026-Demo', $14, $14,
+            $15, $16, $17, $18,
+            'synced', $19, $14,
+            'indexed_demo', $20, $14
+        )
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(import_id)
+    .bind(seed.case_code)
+    .bind(seed.title)
+    .bind(seed.source_type)
+    .bind(seed.area_name)
+    .bind(seed.risk_level)
+    .bind(seed.risk_score)
+    .bind(seed.status)
+    .bind(seed.alert_status)
+    .bind(seed.assignee)
+    .bind(now_at - Duration::days(5 - index))
+    .bind(now_at + Duration::days(2 + index))
+    .bind(now_at)
+    .bind(seed.reason)
+    .bind(seed.advice)
+    .bind(if seed.risk_level == "high" { "manual_review_required" } else { "pending" })
+    .bind(seed.risk_tags)
+    .bind(format!("Demo synced {} into HugeGraph presentation graph", seed.case_code))
+    .bind(format!("Demo indexed {} into vector presentation fallback; replace with Milvus when service is up", seed.case_code))
+    .fetch_one(db)
+    .await
+    .map_err(|_| AppError::Internal)
+}
+
+async fn insert_demo_entities(
+    db: &sqlx::PgPool,
+    case_id: Uuid,
+    seed: &DemoCaseSeed,
+    now_at: DateTime<Utc>,
+) -> Result<Vec<Uuid>, AppError> {
+    let entity_types = ["organization", "area", "risk_event"];
+    let mut entity_ids = Vec::with_capacity(seed.entity_names.len());
+    for (index, entity_name) in seed.entity_names.iter().enumerate() {
+        let entity_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO knowledge_entities (
+                id, case_id, entity_type, entity_name, confidence, extracted_at, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $6)
+            "#,
+        )
+        .bind(entity_id)
+        .bind(case_id)
+        .bind(entity_types[index])
+        .bind(entity_name)
+        .bind(0.92_f64 + (index as f64 * 0.02))
+        .bind(now_at)
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+        entity_ids.push(entity_id);
+    }
+    Ok(entity_ids)
+}
+
+async fn insert_demo_relations(
+    db: &sqlx::PgPool,
+    entity_ids: &[Uuid],
+    now_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    if entity_ids.len() < 3 {
+        return Ok(());
+    }
+    for (relation_type, source, target, confidence) in [
+        ("located_in", entity_ids[0], entity_ids[1], 0.94_f64),
+        ("triggers_risk", entity_ids[0], entity_ids[2], 0.91_f64),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO graph_relations (
+                id, relation_type, source_entity_id, target_entity_id, confidence, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(relation_type)
+        .bind(source)
+        .bind(target)
+        .bind(confidence)
+        .bind(now_at)
+        .execute(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    }
+    Ok(())
+}
+
+async fn insert_demo_alert(
+    db: &sqlx::PgPool,
+    case_id: Uuid,
+    seed: &DemoCaseSeed,
+    index: i64,
+    now_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO alerts (
+            id, case_id, title, severity, status, summary, created_at, updated_at, handled_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $7, CASE WHEN $5 <> 'open' THEN $7 ELSE NULL END)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(case_id)
+    .bind(format!("Demo 预警：{}", seed.title))
+    .bind(seed.risk_level)
+    .bind(seed.alert_status)
+    .bind(seed.reason)
+    .bind(now_at + Duration::seconds(index * 3))
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+async fn insert_demo_dispatch_task(
+    db: &sqlx::PgPool,
+    case_id: Uuid,
+    seed: &DemoCaseSeed,
+    index: i64,
+    now_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO dispatch_tasks (
+            id, case_id, title, assignee, priority, status, progress_note,
+            due_at, completed_at, feedback_result, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $6 = 'completed' THEN $9 ELSE NULL END, $10, $9, $9)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(case_id)
+    .bind(format!("Demo 处置任务：{}", seed.title))
+    .bind(seed.assignee)
+    .bind(if seed.risk_level == "high" { "urgent" } else { "normal" })
+    .bind(if seed.status == "disposed" { "completed" } else { "in_progress" })
+    .bind("Demo 演示：已完成责任链确认，待页面展示流转记录。")
+    .bind(now_at + Duration::days(3 + index))
+    .bind(now_at)
+    .bind("Demo 演示反馈：已形成阶段性处置意见。")
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+async fn insert_demo_extraction_run(
+    db: &sqlx::PgPool,
+    run_id: Uuid,
+    item_count: i32,
+    entity_count: i32,
+    relation_count: i32,
+    now_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO extraction_runs (
+            id, scope_type, mode, status, item_count, success_count, failure_count,
+            summary, started_at, finished_at, created_at, updated_at,
+            provider_style, model_name, graph_sync_status, graph_sync_message,
+            vector_sync_status, vector_sync_message
+        )
+        VALUES (
+            $1, 'demo_full_flow', 'demo', 'completed', $2, $2, 0,
+            $3, $4, $4, $4, $4,
+            'openai_chat_completion_compatible', 'Qwen2.5-Coder-7B-Instruct',
+            'synced', 'Demo graph synchronized into HugeGraph presentation graph',
+            'indexed_demo', 'Demo vector fallback indexed while Milvus service is not required for presentation'
+        )
+        "#,
+    )
+    .bind(run_id)
+    .bind(item_count)
+    .bind(format!(
+        "Demo extraction completed: {item_count} cases, {entity_count} entities, {relation_count} relations."
+    ))
+    .bind(now_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+async fn insert_demo_report(
+    state: &AppState,
+    report_id: Uuid,
+    case_count: i32,
+    now_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let report_dir = state.settings().storage.report_dir.clone();
+    fs::create_dir_all(&report_dir).map_err(|_| AppError::Internal)?;
+    let file_path = format!("{report_dir}/demo-full-flow-2026.md");
+    let content = r#"# 通州区基层社会治理风险研判演示报告
+
+## 一、总体态势
+本次 Demo 汇聚 12345 热线、110 接处警、综治信访、检察院信访与 395 平台项目数据，形成“导入-映射-处理-抽取-图谱/向量-风险研判-预警-分派-报告”的完整演示闭环。
+
+## 二、重点风险
+1. 工程建设与欠薪风险需要优先联动住建、属地街镇和公安。
+2. 食品安全投诉适合通过市场监管复核和历史诉求回溯处理。
+3. 重复信访与裁判监督线索需要形成一次性释法说理和责任边界梳理。
+
+## 三、处置建议
+建议演示时依次打开全流程演示页、风险案件列表、技术运维后台和报告页，展示案件状态、外部同步状态、责任任务和报告产物。
+"#;
+    fs::write(&file_path, content).map_err(|_| AppError::Internal)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO generated_reports (
+            id, title, report_type, period, status, file_path, generated_at, created_at,
+            summary, provider_style, model_name
+        )
+        VALUES (
+            $1, '通州区基层社会治理风险研判 Demo 报告',
+            'demo_full_flow', '2026-Demo', 'ready', $2, $3, $3,
+            $4, 'openai_chat_completion_compatible', 'Qwen2.5-Coder-7B-Instruct'
+        )
+        "#,
+    )
+    .bind(report_id)
+    .bind(&file_path)
+    .bind(now_at)
+    .bind(format!(
+        "Demo 报告已生成，覆盖 {case_count} 个多源风险案件和完整处置闭环。"
+    ))
+    .execute(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
 async fn dashboard_overview(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<DashboardOverviewResponse>>, AppError> {
     let import_batches = count(state.db(), "SELECT COUNT(*) FROM imports").await?;
     let risk_cases = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
-    let high_risk = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'").await?;
+    let high_risk = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'",
+    )
+    .await?;
     let pending_alerts = count(
         state.db(),
         "SELECT COUNT(*) FROM alerts WHERE status IN ('open', 'acknowledged')",
@@ -988,8 +1831,24 @@ async fn dashboard_overview(
     Ok(ok(DashboardOverviewResponse {
         generated_at: now(),
         metrics: vec![
-            metric_card("import_batches", "Import Batches", import_batches.to_string(), None, None, None, "healthy"),
-            metric_card("risk_cases", "Risk Cases", risk_cases.to_string(), None, None, None, "healthy"),
+            metric_card(
+                "import_batches",
+                "Import Batches",
+                import_batches.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "risk_cases",
+                "Risk Cases",
+                risk_cases.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
             metric_card(
                 "high_risk_cases",
                 "High Risk Cases",
@@ -1006,7 +1865,11 @@ async fn dashboard_overview(
                 None,
                 None,
                 None,
-                if pending_alerts > 0 { "warning" } else { "healthy" },
+                if pending_alerts > 0 {
+                    "warning"
+                } else {
+                    "healthy"
+                },
             ),
             metric_card(
                 "in_progress_tasks",
@@ -1033,13 +1896,23 @@ async fn dashboard_overview(
                 key: "pending_alerts".to_string(),
                 label: "Pending Alerts".to_string(),
                 count: pending_alerts.max(0) as u32,
-                status: if pending_alerts > 0 { "warning" } else { "healthy" }.to_string(),
+                status: if pending_alerts > 0 {
+                    "warning"
+                } else {
+                    "healthy"
+                }
+                .to_string(),
             },
             QueueItem {
                 key: "in_progress_tasks".to_string(),
                 label: "Dispatch Queue".to_string(),
                 count: in_progress_tasks.max(0) as u32,
-                status: if in_progress_tasks > 0 { "running" } else { "healthy" }.to_string(),
+                status: if in_progress_tasks > 0 {
+                    "running"
+                } else {
+                    "healthy"
+                }
+                .to_string(),
             },
             QueueItem {
                 key: "high_risk_cases".to_string(),
@@ -1056,20 +1929,66 @@ async fn dashboard_summary(
 ) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let import_batches = count(state.db(), "SELECT COUNT(*) FROM imports").await?;
     let risk_cases = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
-    let high_risk = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'").await?;
-    let pending_alerts = count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status IN ('open', 'acknowledged')").await?;
-    let in_progress_tasks = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks WHERE status IN ('assigned', 'in_progress')").await?;
+    let high_risk = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'",
+    )
+    .await?;
+    let pending_alerts = count(
+        state.db(),
+        "SELECT COUNT(*) FROM alerts WHERE status IN ('open', 'acknowledged')",
+    )
+    .await?;
+    let in_progress_tasks = count(
+        state.db(),
+        "SELECT COUNT(*) FROM dispatch_tasks WHERE status IN ('assigned', 'in_progress')",
+    )
+    .await?;
     let reports = count(state.db(), "SELECT COUNT(*) FROM generated_reports").await?;
 
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_num("import_batches", "Import Batches", import_batches, "healthy", false),
+            metric_num(
+                "import_batches",
+                "Import Batches",
+                import_batches,
+                "healthy",
+                false,
+            ),
             metric_num("risk_cases", "Risk Cases", risk_cases, "healthy", false),
-            metric_num("high_risk_cases", "High Risk Cases", high_risk, if high_risk > 0 { "warning" } else { "healthy" }, false),
-            metric_num("pending_alerts", "Pending Alerts", pending_alerts, if pending_alerts > 0 { "warning" } else { "healthy" }, false),
-            metric_num("in_progress_tasks", "In Progress Tasks", in_progress_tasks, "healthy", false),
-            metric_num("generated_reports", "Generated Reports", reports, "healthy", false),
+            metric_num(
+                "high_risk_cases",
+                "High Risk Cases",
+                high_risk,
+                if high_risk > 0 { "warning" } else { "healthy" },
+                false,
+            ),
+            metric_num(
+                "pending_alerts",
+                "Pending Alerts",
+                pending_alerts,
+                if pending_alerts > 0 {
+                    "warning"
+                } else {
+                    "healthy"
+                },
+                false,
+            ),
+            metric_num(
+                "in_progress_tasks",
+                "In Progress Tasks",
+                in_progress_tasks,
+                "healthy",
+                false,
+            ),
+            metric_num(
+                "generated_reports",
+                "Generated Reports",
+                reports,
+                "healthy",
+                false,
+            ),
         ],
     }))
 }
@@ -1100,9 +2019,21 @@ async fn ingestion_summary_view(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<IngestionSummaryResponse>>, AppError> {
     let batch_total = count(state.db(), "SELECT COUNT(*) FROM imports").await?;
-    let total_records = count(state.db(), "SELECT COALESCE(SUM(total_record_count), 0) FROM imports").await?;
-    let processed = count(state.db(), "SELECT COUNT(*) FROM imports WHERE status = 'processed'").await?;
-    let failed = count(state.db(), "SELECT COUNT(*) FROM imports WHERE status = 'failed'").await?;
+    let total_records = count(
+        state.db(),
+        "SELECT COALESCE(SUM(total_record_count), 0) FROM imports",
+    )
+    .await?;
+    let processed = count(
+        state.db(),
+        "SELECT COUNT(*) FROM imports WHERE status = 'processed'",
+    )
+    .await?;
+    let failed = count(
+        state.db(),
+        "SELECT COUNT(*) FROM imports WHERE status = 'failed'",
+    )
+    .await?;
 
     let rows = sqlx::query_as::<_, IngestionSourceRow>(
         r#"
@@ -1123,10 +2054,42 @@ async fn ingestion_summary_view(
     Ok(ok(IngestionSummaryResponse {
         generated_at: now(),
         totals: vec![
-            metric_card("batch_total", "Batch Total", batch_total.to_string(), None, None, None, "healthy"),
-            metric_card("record_total", "Record Total", total_records.to_string(), None, None, None, "healthy"),
-            metric_card("processed", "Processed Batches", processed.to_string(), None, None, None, "healthy"),
-            metric_card("failed", "Failed Batches", failed.to_string(), None, None, None, if failed > 0 { "critical" } else { "healthy" }),
+            metric_card(
+                "batch_total",
+                "Batch Total",
+                batch_total.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "record_total",
+                "Record Total",
+                total_records.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "processed",
+                "Processed Batches",
+                processed.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "failed",
+                "Failed Batches",
+                failed.to_string(),
+                None,
+                None,
+                None,
+                if failed > 0 { "critical" } else { "healthy" },
+            ),
         ],
         sources: rows
             .into_iter()
@@ -1136,7 +2099,12 @@ async fn ingestion_summary_view(
                 batch_count: row.batch_count.max(0) as u32,
                 record_count: row.record_count.max(0) as u32,
                 latest_import_at: row.latest_import_at.to_rfc3339(),
-                status: if row.batch_count > 0 { "healthy" } else { "warning" }.to_string(),
+                status: if row.batch_count > 0 {
+                    "healthy"
+                } else {
+                    "warning"
+                }
+                .to_string(),
             })
             .collect(),
     }))
@@ -1286,7 +2254,8 @@ async fn process_ingestion_action_live(
     let ai_service = build_ai_service(&state, &integration_values);
     let embedding_service = build_embedding_service(&state, &integration_values);
     let vector_store = build_vector_store(&state, &integration_values);
-    let result = process_import_batch(&state, id, &ai_service, &embedding_service, &vector_store).await?;
+    let result =
+        process_import_batch(&state, id, &ai_service, &embedding_service, &vector_store).await?;
 
     Ok(ok(ActionResponse {
         id: result.import_id.to_string(),
@@ -1308,6 +2277,32 @@ async fn process_ingestion_action_live(
     }))
 }
 
+async fn start_ingestion_processing_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<JobDto>>, AppError> {
+    ensure_import_exists(state.db(), id).await?;
+
+    let job_id = Uuid::new_v4();
+    let job = insert_platform_job(
+        state.db(),
+        job_id,
+        "ingestion_processing",
+        "import",
+        Some(id),
+        serde_json::json!({
+            "import_id": id,
+            "action": "process_import_batch",
+            "mode": "async"
+        }),
+        "queued import processing job",
+    )
+    .await?;
+
+    spawn_ingestion_processing_job(state, job_id, id);
+    Ok(ok(job))
+}
+
 async fn mapping_summary(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
@@ -1318,20 +2313,33 @@ async fn mapping_summary(
     )
     .await?;
     let fields = count(state.db(), "SELECT COUNT(*) FROM mapping_fields").await?;
-    let needs_review =
-        count(state.db(), "SELECT COUNT(*) FROM mapping_fields WHERE status = 'needs_review'").await?;
+    let needs_review = count(
+        state.db(),
+        "SELECT COUNT(*) FROM mapping_fields WHERE status = 'needs_review'",
+    )
+    .await?;
 
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
             metric_num("template_total", "Template Total", total, "healthy", false),
-            metric_num("template_active", "Active Templates", active, "healthy", false),
+            metric_num(
+                "template_active",
+                "Active Templates",
+                active,
+                "healthy",
+                false,
+            ),
             metric_num("field_total", "Mapped Fields", fields, "healthy", false),
             metric_num(
                 "needs_review",
                 "Fields Pending Review",
                 needs_review,
-                if needs_review > 0 { "warning" } else { "healthy" },
+                if needs_review > 0 {
+                    "warning"
+                } else {
+                    "healthy"
+                },
                 false,
             ),
         ],
@@ -1512,7 +2520,10 @@ async fn save_mapping_template(
         .bind(field.status.trim())
         .bind(field.sample_value.trim())
         .bind(index as i32)
-        .bind(matches!(field.target_field.as_str(), "case_title" | "area_name" | "occurred_at"))
+        .bind(matches!(
+            field.target_field.as_str(),
+            "case_title" | "area_name" | "occurred_at"
+        ))
         .bind(now_at)
         .execute(&mut *tx)
         .await
@@ -1543,7 +2554,10 @@ async fn validate_mapping(
     .ok_or(AppError::NotFound)?;
 
     let fields = load_mapping_field_rows(state.db(), template.id).await?;
-    let mapped_targets = fields.iter().map(|field| field.target_field.clone()).collect::<Vec<_>>();
+    let mapped_targets = fields
+        .iter()
+        .map(|field| field.target_field.clone())
+        .collect::<Vec<_>>();
     let missing_required_fields = payload
         .required_fields
         .into_iter()
@@ -1551,8 +2565,14 @@ async fn validate_mapping(
         .collect::<Vec<_>>();
 
     let mut data = HashMap::new();
-    data.insert("template_id".to_string(), serde_json::json!(template.id.to_string()));
-    data.insert("is_valid".to_string(), serde_json::json!(missing_required_fields.is_empty()));
+    data.insert(
+        "template_id".to_string(),
+        serde_json::json!(template.id.to_string()),
+    );
+    data.insert(
+        "is_valid".to_string(),
+        serde_json::json!(missing_required_fields.is_empty()),
+    );
     data.insert(
         "missing_required_fields".to_string(),
         serde_json::json!(missing_required_fields),
@@ -1592,10 +2612,22 @@ async fn processing_summary(
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_num("queued", "Queued Tasks", queued, if queued > 0 { "warning" } else { "healthy" }, false),
+            metric_num(
+                "queued",
+                "Queued Tasks",
+                queued,
+                if queued > 0 { "warning" } else { "healthy" },
+                false,
+            ),
             metric_num("running", "Running Tasks", running, "healthy", false),
             metric_num("completed", "Completed Tasks", completed, "healthy", false),
-            metric_num("failed", "Failed Tasks", failed, if failed > 0 { "critical" } else { "healthy" }, false),
+            metric_num(
+                "failed",
+                "Failed Tasks",
+                failed,
+                if failed > 0 { "critical" } else { "healthy" },
+                false,
+            ),
         ],
     }))
 }
@@ -1620,8 +2652,17 @@ async fn retry_processing_run(
 ) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
     ensure_workflow_run_exists(state.db(), id, "processing").await?;
     let now_at = Utc::now();
-    insert_workflow_run(state.db(), "processing", "Data Processing", "queued", 0, 0, 0, now_at)
-        .await?;
+    insert_workflow_run(
+        state.db(),
+        "processing",
+        "Data Processing",
+        "queued",
+        0,
+        0,
+        0,
+        now_at,
+    )
+    .await?;
     Ok(ok(ActionResponse {
         id: id.to_string(),
         status: "queued".to_string(),
@@ -1636,8 +2677,11 @@ async fn extraction_summary_view(
 ) -> Result<Json<ApiResponse<ExtractionSummaryResponse>>, AppError> {
     let entity_total = count(state.db(), "SELECT COUNT(*) FROM knowledge_entities").await?;
     let relation_total = count(state.db(), "SELECT COUNT(*) FROM graph_relations").await?;
-    let completed_runs =
-        count(state.db(), "SELECT COUNT(*) FROM extraction_runs WHERE status LIKE 'completed%'").await?;
+    let completed_runs = count(
+        state.db(),
+        "SELECT COUNT(*) FROM extraction_runs WHERE status LIKE 'completed%'",
+    )
+    .await?;
 
     let rows = sqlx::query_as::<_, ExtractionEntityRow>(
         r#"
@@ -1654,9 +2698,33 @@ async fn extraction_summary_view(
     Ok(ok(ExtractionSummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_card("entities", "Entities", entity_total.to_string(), None, None, None, "healthy"),
-            metric_card("relations", "Relations", relation_total.to_string(), None, None, None, "healthy"),
-            metric_card("completed_runs", "Completed Runs", completed_runs.to_string(), None, None, None, "healthy"),
+            metric_card(
+                "entities",
+                "Entities",
+                entity_total.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "relations",
+                "Relations",
+                relation_total.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "completed_runs",
+                "Completed Runs",
+                completed_runs.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
         ],
         recent_entities: rows
             .into_iter()
@@ -1766,21 +2834,96 @@ async fn create_extraction_run_live(
     }))
 }
 
+async fn start_extraction_job(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateExtractionRunRequest>,
+) -> Result<Json<ApiResponse<JobDto>>, AppError> {
+    if matches!(payload.case_ids.as_ref(), Some(case_ids) if case_ids.is_empty()) {
+        return Err(AppError::Validation("case_ids cannot be empty".to_string()));
+    }
+
+    let job_id = Uuid::new_v4();
+    let job = insert_platform_job(
+        state.db(),
+        job_id,
+        "knowledge_extraction",
+        "extraction_run",
+        None,
+        serde_json::json!({
+            "case_ids": payload.case_ids.clone(),
+            "mode": payload.mode.clone(),
+            "action": "execute_extraction_run"
+        }),
+        "queued knowledge extraction job",
+    )
+    .await?;
+
+    spawn_extraction_job(state, job_id, payload);
+    Ok(ok(job))
+}
+
 async fn graph_summary(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let nodes = count(state.db(), "SELECT COUNT(*) FROM knowledge_entities").await?;
     let edges = count(state.db(), "SELECT COUNT(*) FROM graph_relations").await?;
-    let covered_cases =
-        count(state.db(), "SELECT COUNT(DISTINCT case_id) FROM knowledge_entities").await?;
+    let covered_cases = count(
+        state.db(),
+        "SELECT COUNT(DISTINCT case_id) FROM knowledge_entities",
+    )
+    .await?;
+    let synced_cases = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE graph_sync_status = 'synced'",
+    )
+    .await?;
+    let failed_cases = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE graph_sync_status = 'failed'",
+    )
+    .await?;
+    let pending_cases = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE graph_sync_status IN ('pending', 'not_configured')",
+    )
+    .await?;
 
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
             metric_num("nodes", "Graph Nodes", nodes, "healthy", false),
             metric_num("edges", "Graph Edges", edges, "healthy", false),
-            metric_num("covered_cases", "Cases With Graph", covered_cases, "healthy", false),
-            metric_bool("hugegraph_sync", "HugeGraph Sync", false, "placeholder", true),
+            metric_num(
+                "covered_cases",
+                "Cases With Graph",
+                covered_cases,
+                "healthy",
+                false,
+            ),
+            metric_num(
+                "hugegraph_synced_cases",
+                "HugeGraph Synced Cases",
+                synced_cases,
+                if failed_cases > 0 {
+                    "critical"
+                } else if pending_cases > 0 {
+                    "warning"
+                } else {
+                    "healthy"
+                },
+                false,
+            ),
+            metric_num(
+                "hugegraph_failed_cases",
+                "HugeGraph Failed Cases",
+                failed_cases,
+                if failed_cases > 0 {
+                    "critical"
+                } else {
+                    "healthy"
+                },
+                false,
+            ),
         ],
     }))
 }
@@ -1790,8 +2933,11 @@ async fn graph_overview(
 ) -> Result<Json<ApiResponse<GraphOverviewResponse>>, AppError> {
     let nodes = count(state.db(), "SELECT COUNT(*) FROM knowledge_entities").await?;
     let edges = count(state.db(), "SELECT COUNT(*) FROM graph_relations").await?;
-    let covered_cases =
-        count(state.db(), "SELECT COUNT(DISTINCT case_id) FROM knowledge_entities").await?;
+    let covered_cases = count(
+        state.db(),
+        "SELECT COUNT(DISTINCT case_id) FROM knowledge_entities",
+    )
+    .await?;
 
     let relation_rows = sqlx::query_as::<_, RelationTypeRow>(
         r#"
@@ -1808,9 +2954,33 @@ async fn graph_overview(
     Ok(ok(GraphOverviewResponse {
         generated_at: now(),
         metrics: vec![
-            metric_card("nodes", "Nodes", nodes.to_string(), None, None, None, "healthy"),
-            metric_card("edges", "Edges", edges.to_string(), None, None, None, "healthy"),
-            metric_card("covered_cases", "Cases With Graph", covered_cases.to_string(), None, None, None, "healthy"),
+            metric_card(
+                "nodes",
+                "Nodes",
+                nodes.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "edges",
+                "Edges",
+                edges.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "covered_cases",
+                "Cases With Graph",
+                covered_cases.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
         ],
         relation_types: relation_rows
             .into_iter()
@@ -1894,39 +3064,180 @@ async fn rebuild_graph_case(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
-    let case_count = count_case(state.db(), "risk_cases", id).await?;
-    if case_count == 0 {
-        return Err(AppError::NotFound);
+    let now_at = Utc::now();
+    let case = sqlx::query_as::<_, GraphCaseSyncRow>(
+        r#"
+        SELECT id, case_code, title, area_name, risk_level, source_type
+        FROM risk_cases
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or(AppError::NotFound)?;
+
+    let entities = sqlx::query_as::<_, GraphEntitySyncRow>(
+        r#"
+        SELECT entity_type, entity_name, confidence
+        FROM knowledge_entities
+        WHERE case_id = $1
+        ORDER BY extracted_at DESC, id DESC
+        "#,
+    )
+    .bind(id)
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    if entities.is_empty() {
+        return Ok(ok(ActionResponse {
+            id: id.to_string(),
+            status: "pending_extraction".to_string(),
+            message: "case has no extracted entities yet; run /api/extraction/run before rebuilding HugeGraph".to_string(),
+            updated_at: now_at.to_rfc3339(),
+            is_placeholder: false,
+        }));
     }
 
-    let now_at = Utc::now();
-    insert_workflow_run(state.db(), "graph", "Graph Build", "queued", 1, 0, 0, now_at).await?;
-    Ok(ok(ActionResponse {
-        id: id.to_string(),
-        status: "queued".to_string(),
-        message: "queued graph rebuild for the selected case".to_string(),
-        updated_at: now_at.to_rfc3339(),
-        is_placeholder: false,
-    }))
+    let relations = sqlx::query_as::<_, GraphRelationSyncRow>(
+        r#"
+        SELECT
+            gr.relation_type,
+            source.entity_name AS source_entity_name,
+            target.entity_name AS target_entity_name,
+            gr.confidence
+        FROM graph_relations gr
+        JOIN knowledge_entities source ON source.id = gr.source_entity_id
+        JOIN knowledge_entities target ON target.id = gr.target_entity_id
+        WHERE source.case_id = $1
+          AND target.case_id = $1
+        ORDER BY gr.created_at DESC
+        "#,
+    )
+    .bind(id)
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    let integration_values = load_setting_map(state.db(), "integrations").await?;
+    let graph_service = build_hugegraph_service(&state, &integration_values);
+    let sync_input = GraphCaseSyncInput {
+        case_id: case.id.to_string(),
+        case_code: case.case_code.clone(),
+        title: case.title,
+        area_name: case.area_name,
+        risk_level: case.risk_level,
+        source_type: case.source_type,
+        entities: entities
+            .into_iter()
+            .map(|entity| GraphEntitySync {
+                entity_type: entity.entity_type,
+                entity_name: entity.entity_name,
+                confidence: entity.confidence,
+            })
+            .collect(),
+        relations: relations
+            .into_iter()
+            .map(|relation| GraphRelationSync {
+                relation_type: relation.relation_type,
+                source_entity_name: relation.source_entity_name,
+                target_entity_name: relation.target_entity_name,
+                confidence: relation.confidence,
+            })
+            .collect(),
+    };
+
+    match graph_service.sync_case_graph(&sync_input).await {
+        Ok(result) => {
+            let message = format!(
+                "{} (vertices={}, edges={})",
+                result.message, result.vertex_count, result.edge_count
+            );
+            update_risk_case_graph_sync_status(
+                state.db(),
+                id,
+                &result.status,
+                &message,
+                Utc::now(),
+            )
+            .await?;
+            insert_workflow_run(
+                state.db(),
+                "graph",
+                "Graph Build",
+                "completed",
+                1,
+                1,
+                0,
+                now_at,
+            )
+            .await?;
+            Ok(ok(ActionResponse {
+                id: id.to_string(),
+                status: result.status,
+                message,
+                updated_at: Utc::now().to_rfc3339(),
+                is_placeholder: false,
+            }))
+        }
+        Err(error) => {
+            update_risk_case_graph_sync_status(state.db(), id, "failed", &error, Utc::now())
+                .await?;
+            insert_workflow_run(
+                state.db(),
+                "graph",
+                "Graph Build",
+                "failed",
+                1,
+                0,
+                1,
+                now_at,
+            )
+            .await?;
+            Ok(ok(ActionResponse {
+                id: id.to_string(),
+                status: "failed".to_string(),
+                message: error,
+                updated_at: Utc::now().to_rfc3339(),
+                is_placeholder: false,
+            }))
+        }
+    }
 }
 
 async fn risk_summary(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let total = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
-    let high = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'").await?;
+    let high = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'",
+    )
+    .await?;
     let reviewing = count(
         state.db(),
         "SELECT COUNT(*) FROM risk_cases WHERE status IN ('pending_review', 'in_progress')",
     )
     .await?;
-    let closed = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE status = 'closed'").await?;
+    let closed = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE status = 'closed'",
+    )
+    .await?;
 
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
             metric_num("total", "Risk Cases", total, "healthy", false),
-            metric_num("high", "High Risk Cases", high, if high > 0 { "warning" } else { "healthy" }, false),
+            metric_num(
+                "high",
+                "High Risk Cases",
+                high,
+                if high > 0 { "warning" } else { "healthy" },
+                false,
+            ),
             metric_num("reviewing", "Reviewing Cases", reviewing, "healthy", false),
             metric_num("closed", "Closed Cases", closed, "healthy", false),
         ],
@@ -1937,7 +3248,11 @@ async fn risk_overview(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<RiskOverviewResponse>>, AppError> {
     let total = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
-    let high = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'").await?;
+    let high = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'",
+    )
+    .await?;
     let reviewing = count(
         state.db(),
         "SELECT COUNT(*) FROM risk_cases WHERE status IN ('pending_review', 'in_progress')",
@@ -1958,9 +3273,33 @@ async fn risk_overview(
     Ok(ok(RiskOverviewResponse {
         generated_at: now(),
         metrics: vec![
-            metric_card("total", "Risk Cases", total.to_string(), None, None, None, "healthy"),
-            metric_card("high", "High Risk", high.to_string(), None, None, None, if high > 0 { "warning" } else { "healthy" }),
-            metric_card("reviewing", "Reviewing", reviewing.to_string(), None, None, None, "healthy"),
+            metric_card(
+                "total",
+                "Risk Cases",
+                total.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "high",
+                "High Risk",
+                high.to_string(),
+                None,
+                None,
+                None,
+                if high > 0 { "warning" } else { "healthy" },
+            ),
+            metric_card(
+                "reviewing",
+                "Reviewing",
+                reviewing.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
         ],
         top_risks: rows
             .into_iter()
@@ -1983,7 +3322,25 @@ async fn risk_case_list(
     let page = normalize_page(query.page);
     let page_size = normalize_page_size(query.page_size);
     let offset = (page - 1) * page_size;
-    let total = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
+    let total = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM risk_cases
+        WHERE ($1::TEXT IS NULL OR status = $1)
+          AND ($2::TEXT IS NULL OR risk_level = $2)
+          AND ($3::TEXT IS NULL OR area_name = $3)
+          AND ($4::TEXT IS NULL OR source_type = $4)
+          AND ($5::UUID IS NULL OR import_id = $5)
+        "#,
+    )
+    .bind(query.status.as_deref())
+    .bind(query.risk_level.as_deref())
+    .bind(query.area_name.as_deref())
+    .bind(query.source_type.as_deref())
+    .bind(query.import_id)
+    .fetch_one(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
 
     let items = sqlx::query_as::<_, RiskCaseListItem>(
         r#"
@@ -1998,14 +3355,16 @@ async fn risk_case_list(
           AND ($2::TEXT IS NULL OR risk_level = $2)
           AND ($3::TEXT IS NULL OR area_name = $3)
           AND ($4::TEXT IS NULL OR source_type = $4)
+          AND ($5::UUID IS NULL OR import_id = $5)
         ORDER BY risk_score DESC, updated_at DESC
-        LIMIT $5 OFFSET $6
+        LIMIT $6 OFFSET $7
         "#,
     )
     .bind(query.status.as_deref())
     .bind(query.risk_level.as_deref())
     .bind(query.area_name.as_deref())
     .bind(query.source_type.as_deref())
+    .bind(query.import_id)
     .bind(page_size)
     .bind(offset)
     .fetch_all(state.db())
@@ -2118,48 +3477,57 @@ async fn risk_case_detail_view(
     let embedding_service = build_embedding_service(&state, &integration_values);
     let vector_store = build_vector_store(&state, &integration_values);
     let similar_cases = vector_store
-        .search_similar_cases(
-            &crate::services::vector::VectorSearchQuery {
-                embedding: embedding_service
-                    .embed_text(&format!(
-                        "{}\n{}\n{}\n{}\n{}",
-                        case_info.title,
-                        case_info.area_name,
-                        case_info.risk_reason_summary,
-                        case_info.risk_level,
-                        case_info.source_type
-                    ))
-                    .await
-                    .unwrap_or_default(),
-                exclude_case_id: Some(case_info.id.to_string()),
-                limit: 5,
-            },
-        )
+        .search_similar_cases(&crate::services::vector::VectorSearchQuery {
+            embedding: embedding_service
+                .embed_text(&format!(
+                    "{}\n{}\n{}\n{}\n{}",
+                    case_info.title,
+                    case_info.area_name,
+                    case_info.risk_reason_summary,
+                    case_info.risk_level,
+                    case_info.source_type
+                ))
+                .await
+                .unwrap_or_default(),
+            exclude_case_id: Some(case_info.id.to_string()),
+            limit: 5,
+        })
         .await
         .unwrap_or_default();
 
-    let recommendation = ai_service
-        .recommend_case_action(&RecommendationInput {
-            title: case_info.title.clone(),
-            area_name: case_info.area_name.clone(),
-            risk_level: case_info.risk_level.clone(),
-            source_type: case_info.source_type.clone(),
-            entity_count: entities.len(),
-            alert_count: alerts.len(),
-            dispatch_count: dispatch_tasks.len(),
-            reference_cases: format_reference_case_hits(&similar_cases),
-        })
-        .await;
+    let stored_reason_summary = case_info.risk_reason_summary.trim();
+    let stored_disposal_advice = case_info.disposal_advice.trim();
+    let recommendation = if stored_reason_summary.is_empty() || stored_disposal_advice.is_empty() {
+        ai_service
+            .recommend_case_action(&RecommendationInput {
+                title: case_info.title.clone(),
+                area_name: case_info.area_name.clone(),
+                risk_level: case_info.risk_level.clone(),
+                source_type: case_info.source_type.clone(),
+                entity_count: entities.len(),
+                alert_count: alerts.len(),
+                dispatch_count: dispatch_tasks.len(),
+                reference_cases: format_reference_case_hits(&similar_cases),
+            })
+            .await
+    } else {
+        RecommendationOutput {
+            reason_summary: stored_reason_summary.to_string(),
+            disposal_advice: split_pipe_values(stored_disposal_advice),
+            is_placeholder: false,
+            model_contract: ai_service.configured_contract(),
+        }
+    };
 
-    let reason_summary = if case_info.risk_reason_summary.trim().is_empty() {
+    let reason_summary = if stored_reason_summary.is_empty() {
         recommendation.reason_summary.clone()
     } else {
-        case_info.risk_reason_summary.clone()
+        stored_reason_summary.to_string()
     };
-    let disposal_advice = if case_info.disposal_advice.trim().is_empty() {
+    let disposal_advice = if stored_disposal_advice.is_empty() {
         recommendation.disposal_advice.clone()
     } else {
-        split_pipe_values(&case_info.disposal_advice)
+        split_pipe_values(stored_disposal_advice)
     };
 
     Ok(ok(RiskCaseDetailResponse {
@@ -2247,8 +3615,16 @@ async fn alerts_summary_view(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<AlertsSummaryResponse>>, AppError> {
     let total = count(state.db(), "SELECT COUNT(*) FROM alerts").await?;
-    let open = count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status = 'open'").await?;
-    let acknowledged = count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status = 'acknowledged'").await?;
+    let open = count(
+        state.db(),
+        "SELECT COUNT(*) FROM alerts WHERE status = 'open'",
+    )
+    .await?;
+    let acknowledged = count(
+        state.db(),
+        "SELECT COUNT(*) FROM alerts WHERE status = 'acknowledged'",
+    )
+    .await?;
 
     let items = sqlx::query_as::<_, (Uuid, String, String, String, DateTime<Utc>, String)>(
         r#"
@@ -2272,9 +3648,33 @@ async fn alerts_summary_view(
     Ok(ok(AlertsSummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_card("total", "Alerts", total.to_string(), None, None, None, "healthy"),
-            metric_card("open", "Open Alerts", open.to_string(), None, None, None, if open > 0 { "warning" } else { "healthy" }),
-            metric_card("acknowledged", "Acknowledged Alerts", acknowledged.to_string(), None, None, None, "healthy"),
+            metric_card(
+                "total",
+                "Alerts",
+                total.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "open",
+                "Open Alerts",
+                open.to_string(),
+                None,
+                None,
+                None,
+                if open > 0 { "warning" } else { "healthy" },
+            ),
+            metric_card(
+                "acknowledged",
+                "Acknowledged Alerts",
+                acknowledged.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
         ],
         items: items
             .into_iter()
@@ -2383,8 +3783,16 @@ async fn dispatch_summary(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let total = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks").await?;
-    let assigned = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks WHERE status = 'assigned'").await?;
-    let in_progress = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks WHERE status = 'in_progress'").await?;
+    let assigned = count(
+        state.db(),
+        "SELECT COUNT(*) FROM dispatch_tasks WHERE status = 'assigned'",
+    )
+    .await?;
+    let in_progress = count(
+        state.db(),
+        "SELECT COUNT(*) FROM dispatch_tasks WHERE status = 'in_progress'",
+    )
+    .await?;
     let overdue = count(
         state.db(),
         "SELECT COUNT(*) FROM dispatch_tasks WHERE due_at IS NOT NULL AND due_at < NOW() AND status <> 'completed'",
@@ -2396,8 +3804,20 @@ async fn dispatch_summary(
         metrics: vec![
             metric_num("total", "Dispatch Tasks", total, "healthy", false),
             metric_num("assigned", "Assigned Tasks", assigned, "healthy", false),
-            metric_num("in_progress", "In Progress Tasks", in_progress, "healthy", false),
-            metric_num("overdue", "Overdue Tasks", overdue, if overdue > 0 { "warning" } else { "healthy" }, false),
+            metric_num(
+                "in_progress",
+                "In Progress Tasks",
+                in_progress,
+                "healthy",
+                false,
+            ),
+            metric_num(
+                "overdue",
+                "Overdue Tasks",
+                overdue,
+                if overdue > 0 { "warning" } else { "healthy" },
+                false,
+            ),
         ],
     }))
 }
@@ -2602,24 +4022,72 @@ async fn evaluation_summary_view(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<EvaluationSummaryResponse>>, AppError> {
     let total_cases = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
-    let closed_cases = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE status = 'closed'").await?;
+    let closed_cases = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE status = 'closed'",
+    )
+    .await?;
     let total_tasks = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks").await?;
-    let closed_tasks = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks WHERE status = 'completed'").await?;
+    let closed_tasks = count(
+        state.db(),
+        "SELECT COUNT(*) FROM dispatch_tasks WHERE status = 'completed'",
+    )
+    .await?;
     let alert_total = count(state.db(), "SELECT COUNT(*) FROM alerts").await?;
-    let closed_alerts = count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status = 'closed'").await?;
+    let closed_alerts = count(
+        state.db(),
+        "SELECT COUNT(*) FROM alerts WHERE status = 'closed'",
+    )
+    .await?;
 
     let case_closure_rate = percentage(closed_cases, total_cases);
     let task_closure_rate = percentage(closed_tasks, total_tasks);
-    let alert_accuracy = if alert_total == 0 { 100.0 } else { percentage(closed_alerts, alert_total) };
+    let alert_accuracy = if alert_total == 0 {
+        100.0
+    } else {
+        percentage(closed_alerts, alert_total)
+    };
     let manual_review_pass_rate = if total_cases == 0 { 100.0 } else { 78.0 };
 
     Ok(ok(EvaluationSummaryResponse {
         generated_at: now(),
         metrics: vec![
-            metric_card("case_closure_rate", "Case Closure Rate", format!("{case_closure_rate:.1}"), Some("%".to_string()), None, None, rate_status(case_closure_rate)),
-            metric_card("task_closure_rate", "Task Closure Rate", format!("{task_closure_rate:.1}"), Some("%".to_string()), None, None, rate_status(task_closure_rate)),
-            metric_card("alert_accuracy", "Alert Accuracy", format!("{alert_accuracy:.1}"), Some("%".to_string()), None, None, "placeholder"),
-            metric_card("manual_review_pass_rate", "Manual Review Pass Rate", format!("{manual_review_pass_rate:.1}"), Some("%".to_string()), None, None, "placeholder"),
+            metric_card(
+                "case_closure_rate",
+                "Case Closure Rate",
+                format!("{case_closure_rate:.1}"),
+                Some("%".to_string()),
+                None,
+                None,
+                rate_status(case_closure_rate),
+            ),
+            metric_card(
+                "task_closure_rate",
+                "Task Closure Rate",
+                format!("{task_closure_rate:.1}"),
+                Some("%".to_string()),
+                None,
+                None,
+                rate_status(task_closure_rate),
+            ),
+            metric_card(
+                "alert_accuracy",
+                "Alert Accuracy",
+                format!("{alert_accuracy:.1}"),
+                Some("%".to_string()),
+                None,
+                None,
+                "placeholder",
+            ),
+            metric_card(
+                "manual_review_pass_rate",
+                "Manual Review Pass Rate",
+                format!("{manual_review_pass_rate:.1}"),
+                Some("%".to_string()),
+                None,
+                None,
+                "placeholder",
+            ),
         ],
         dimensions: vec![
             EvaluationDimensionItem {
@@ -2679,8 +4147,16 @@ async fn evaluation_trends(
 async fn supervision_overview(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<SupervisionOverviewResponse>>, AppError> {
-    let running_workflows = count(state.db(), "SELECT COUNT(*) FROM workflow_runs WHERE status = 'running'").await?;
-    let failed_workflows = count(state.db(), "SELECT COUNT(*) FROM workflow_runs WHERE status = 'failed'").await?;
+    let running_workflows = count(
+        state.db(),
+        "SELECT COUNT(*) FROM workflow_runs WHERE status = 'running'",
+    )
+    .await?;
+    let failed_workflows = count(
+        state.db(),
+        "SELECT COUNT(*) FROM workflow_runs WHERE status = 'failed'",
+    )
+    .await?;
     let overdue_tasks = count(
         state.db(),
         "SELECT COUNT(*) FROM dispatch_tasks WHERE due_at IS NOT NULL AND due_at < NOW() AND status <> 'completed'",
@@ -2690,29 +4166,76 @@ async fn supervision_overview(
     Ok(ok(SupervisionOverviewResponse {
         generated_at: now(),
         metrics: vec![
-            metric_card("running_workflows", "Running Workflows", running_workflows.to_string(), None, None, None, "healthy"),
-            metric_card("failed_workflows", "Failed Workflows", failed_workflows.to_string(), None, None, None, if failed_workflows > 0 { "critical" } else { "healthy" }),
-            metric_card("overdue_tasks", "Overdue Tasks", overdue_tasks.to_string(), None, None, None, if overdue_tasks > 0 { "warning" } else { "healthy" }),
+            metric_card(
+                "running_workflows",
+                "Running Workflows",
+                running_workflows.to_string(),
+                None,
+                None,
+                None,
+                "healthy",
+            ),
+            metric_card(
+                "failed_workflows",
+                "Failed Workflows",
+                failed_workflows.to_string(),
+                None,
+                None,
+                None,
+                if failed_workflows > 0 {
+                    "critical"
+                } else {
+                    "healthy"
+                },
+            ),
+            metric_card(
+                "overdue_tasks",
+                "Overdue Tasks",
+                overdue_tasks.to_string(),
+                None,
+                None,
+                None,
+                if overdue_tasks > 0 {
+                    "warning"
+                } else {
+                    "healthy"
+                },
+            ),
         ],
         agents: vec![
             AgentStatusItem {
                 key: "ingestion_agent".to_string(),
                 label: "Ingestion Agent".to_string(),
-                status: if running_workflows > 0 { "running" } else { "ready" }.to_string(),
+                status: if running_workflows > 0 {
+                    "running"
+                } else {
+                    "ready"
+                }
+                .to_string(),
                 running_tasks: running_workflows.max(0) as u32,
                 updated_at: now(),
             },
             AgentStatusItem {
                 key: "analysis_agent".to_string(),
                 label: "Analysis Agent".to_string(),
-                status: if failed_workflows > 0 { "attention" } else { "running" }.to_string(),
+                status: if failed_workflows > 0 {
+                    "attention"
+                } else {
+                    "running"
+                }
+                .to_string(),
                 running_tasks: failed_workflows.max(0) as u32,
                 updated_at: now(),
             },
             AgentStatusItem {
                 key: "dispatch_agent".to_string(),
                 label: "Dispatch Agent".to_string(),
-                status: if overdue_tasks > 0 { "warning" } else { "healthy" }.to_string(),
+                status: if overdue_tasks > 0 {
+                    "warning"
+                } else {
+                    "healthy"
+                }
+                .to_string(),
                 running_tasks: overdue_tasks.max(0) as u32,
                 updated_at: now(),
             },
@@ -2724,8 +4247,16 @@ async fn supervision_summary(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let workflows = count(state.db(), "SELECT COUNT(*) FROM workflow_runs").await?;
-    let failed_workflows = count(state.db(), "SELECT COUNT(*) FROM workflow_runs WHERE status = 'failed'").await?;
-    let extraction_failures = count(state.db(), "SELECT COUNT(*) FROM extraction_runs WHERE status = 'failed'").await?;
+    let failed_workflows = count(
+        state.db(),
+        "SELECT COUNT(*) FROM workflow_runs WHERE status = 'failed'",
+    )
+    .await?;
+    let extraction_failures = count(
+        state.db(),
+        "SELECT COUNT(*) FROM extraction_runs WHERE status = 'failed'",
+    )
+    .await?;
     let overdue_tasks = count(
         state.db(),
         "SELECT COUNT(*) FROM dispatch_tasks WHERE due_at IS NOT NULL AND due_at < NOW() AND status <> 'completed'",
@@ -2736,9 +4267,39 @@ async fn supervision_summary(
         generated_at: now(),
         metrics: vec![
             metric_num("workflows", "Workflow Runs", workflows, "healthy", false),
-            metric_num("failed_workflows", "Failed Workflows", failed_workflows, if failed_workflows > 0 { "critical" } else { "healthy" }, false),
-            metric_num("extraction_failures", "Extraction Failures", extraction_failures, if extraction_failures > 0 { "critical" } else { "healthy" }, false),
-            metric_num("overdue_tasks", "Overdue Tasks", overdue_tasks, if overdue_tasks > 0 { "warning" } else { "healthy" }, false),
+            metric_num(
+                "failed_workflows",
+                "Failed Workflows",
+                failed_workflows,
+                if failed_workflows > 0 {
+                    "critical"
+                } else {
+                    "healthy"
+                },
+                false,
+            ),
+            metric_num(
+                "extraction_failures",
+                "Extraction Failures",
+                extraction_failures,
+                if extraction_failures > 0 {
+                    "critical"
+                } else {
+                    "healthy"
+                },
+                false,
+            ),
+            metric_num(
+                "overdue_tasks",
+                "Overdue Tasks",
+                overdue_tasks,
+                if overdue_tasks > 0 {
+                    "warning"
+                } else {
+                    "healthy"
+                },
+                false,
+            ),
         ],
     }))
 }
@@ -2762,19 +4323,90 @@ async fn supervision_failures(
     Ok(ok(items))
 }
 
+async fn job_list(
+    State(state): State<AppState>,
+    Query(query): Query<JobQuery>,
+) -> Result<Json<ApiResponse<PageResponse<JobDto>>>, AppError> {
+    let page = normalize_page(query.page);
+    let page_size = normalize_page_size(query.page_size);
+    let offset = (page - 1) * page_size;
+
+    let total = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM platform_jobs
+        WHERE ($1::TEXT IS NULL OR status = $1)
+          AND ($2::TEXT IS NULL OR job_type = $2)
+        "#,
+    )
+    .bind(query.status.as_deref())
+    .bind(query.job_type.as_deref())
+    .fetch_one(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    let rows = sqlx::query_as::<_, JobRow>(
+        r#"
+        SELECT id, job_type, target_type, target_id, status, progress_percent, message,
+               request_json, result_json, error_message, started_at, finished_at, created_at, updated_at
+        FROM platform_jobs
+        WHERE ($1::TEXT IS NULL OR status = $1)
+          AND ($2::TEXT IS NULL OR job_type = $2)
+        ORDER BY created_at DESC, id DESC
+        LIMIT $3 OFFSET $4
+        "#,
+    )
+    .bind(query.status.as_deref())
+    .bind(query.job_type.as_deref())
+    .bind(page_size)
+    .bind(offset)
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(ok(PageResponse {
+        generated_at: now(),
+        items: rows.into_iter().map(map_job_row).collect(),
+        page,
+        page_size,
+        total,
+    }))
+}
+
+async fn job_detail(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<JobDto>>, AppError> {
+    Ok(ok(get_platform_job(state.db(), id).await?))
+}
+
 async fn report_summary(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
     let total = count(state.db(), "SELECT COUNT(*) FROM generated_reports").await?;
-    let ready = count(state.db(), "SELECT COUNT(*) FROM generated_reports WHERE status = 'ready'").await?;
-    let draft = count(state.db(), "SELECT COUNT(*) FROM generated_reports WHERE status = 'draft'").await?;
+    let ready = count(
+        state.db(),
+        "SELECT COUNT(*) FROM generated_reports WHERE status = 'ready'",
+    )
+    .await?;
+    let draft = count(
+        state.db(),
+        "SELECT COUNT(*) FROM generated_reports WHERE status = 'draft'",
+    )
+    .await?;
 
     Ok(ok(SummaryResponse {
         generated_at: now(),
         metrics: vec![
             metric_num("total", "Reports", total, "healthy", false),
             metric_num("ready", "Ready Reports", ready, "healthy", false),
-            metric_num("draft", "Draft Reports", draft, if draft > 0 { "warning" } else { "healthy" }, false),
+            metric_num(
+                "draft",
+                "Draft Reports",
+                draft,
+                if draft > 0 { "warning" } else { "healthy" },
+                false,
+            ),
             metric_num("llm_generation", "LLM Generation", 1, "placeholder", true),
         ],
     }))
@@ -2818,10 +4450,52 @@ async fn create_report_live(
     State(state): State<AppState>,
     Json(payload): Json<CreateReportRequest>,
 ) -> Result<Json<ApiResponse<ReportListItem>>, AppError> {
+    Ok(ok(create_report_record(&state, payload).await?))
+}
+
+async fn start_report_job(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateReportRequest>,
+) -> Result<Json<ApiResponse<JobDto>>, AppError> {
     let report_type = payload.report_type.trim();
     let period = payload.period.trim();
     if report_type.is_empty() || period.is_empty() {
-        return Err(AppError::Validation("report_type and period are required".to_string()));
+        return Err(AppError::Validation(
+            "report_type and period are required".to_string(),
+        ));
+    }
+
+    let job_id = Uuid::new_v4();
+    let job = insert_platform_job(
+        state.db(),
+        job_id,
+        "report_generation",
+        "report",
+        None,
+        serde_json::json!({
+            "report_type": payload.report_type.clone(),
+            "period": payload.period.clone(),
+            "title": payload.title.clone(),
+            "action": "generate_report"
+        }),
+        "queued report generation job",
+    )
+    .await?;
+
+    spawn_report_job(state, job_id, payload);
+    Ok(ok(job))
+}
+
+async fn create_report_record(
+    state: &AppState,
+    payload: CreateReportRequest,
+) -> Result<ReportListItem, AppError> {
+    let report_type = payload.report_type.trim();
+    let period = payload.period.trim();
+    if report_type.is_empty() || period.is_empty() {
+        return Err(AppError::Validation(
+            "report_type and period are required".to_string(),
+        ));
     }
 
     let integration_values = load_setting_map(state.db(), "integrations").await?;
@@ -2837,9 +4511,16 @@ async fn create_report_live(
         .unwrap_or_else(|| format!("{}-{}", report_type, period));
 
     let case_count = count(state.db(), "SELECT COUNT(*) FROM risk_cases").await?;
-    let high_risk_count = count(state.db(), "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'").await?;
-    let alert_count =
-        count(state.db(), "SELECT COUNT(*) FROM alerts WHERE status IN ('open', 'acknowledged', 'closed')").await?;
+    let high_risk_count = count(
+        state.db(),
+        "SELECT COUNT(*) FROM risk_cases WHERE risk_level = 'high'",
+    )
+    .await?;
+    let alert_count = count(
+        state.db(),
+        "SELECT COUNT(*) FROM alerts WHERE status IN ('open', 'acknowledged', 'closed')",
+    )
+    .await?;
     let dispatch_count = count(state.db(), "SELECT COUNT(*) FROM dispatch_tasks").await?;
 
     let report = ai_service
@@ -2856,10 +4537,19 @@ async fn create_report_live(
 
     let report_dir = state.settings().storage.report_dir.clone();
     std::fs::create_dir_all(&report_dir).map_err(|_| AppError::Internal)?;
-    let file_path = format!("{}/{}-{}.md", report_dir, report_type, period.replace('/', "-"));
+    let file_path = format!(
+        "{}/{}-{}.md",
+        report_dir,
+        report_type,
+        period.replace('/', "-")
+    );
     std::fs::write(&file_path, report.content).map_err(|_| AppError::Internal)?;
 
-    let report_status = if report.is_placeholder { "draft" } else { "ready" };
+    let report_status = if report.is_placeholder {
+        "draft"
+    } else {
+        "ready"
+    };
     sqlx::query(
         r#"
         INSERT INTO generated_reports (
@@ -2895,13 +4585,13 @@ async fn create_report_live(
     .await
     .map_err(|_| AppError::Internal)?;
 
-    Ok(ok(item))
+    Ok(item)
 }
 
 async fn report_detail(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<ApiResponse<ReportListItem>>, AppError> {
+) -> Result<Json<ApiResponse<ReportDetailItem>>, AppError> {
     let item = sqlx::query_as::<_, ReportListItem>(
         r#"
         SELECT id, title, report_type, period, status, file_path, summary, provider_style, model_name, generated_at, created_at
@@ -2914,7 +4604,17 @@ async fn report_detail(
     .await
     .map_err(|_| AppError::Internal)?
     .ok_or(AppError::NotFound)?;
-    Ok(ok(item))
+    let content_markdown = item
+        .file_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .and_then(|path| fs::read_to_string(path).ok());
+
+    Ok(ok(ReportDetailItem {
+        report: item,
+        content_markdown,
+    }))
 }
 
 async fn regenerate_report(
@@ -2959,16 +4659,46 @@ async fn save_platform_settings_view(
     Json(payload): Json<SavePlatformSettingsRequest>,
 ) -> Result<Json<ApiResponse<PlatformSettingsResponse>>, AppError> {
     let now_at = Utc::now();
-    upsert_setting(state.db(), "platform", "platform_name", payload.platform_name.as_deref(), now_at)
-        .await?;
-    upsert_setting(state.db(), "platform", "environment", payload.environment.as_deref(), now_at)
-        .await?;
-    upsert_setting(state.db(), "platform", "upload_dir", payload.upload_dir.as_deref(), now_at)
-        .await?;
-    upsert_setting(state.db(), "platform", "report_dir", payload.report_dir.as_deref(), now_at)
-        .await?;
-    upsert_setting(state.db(), "platform", "training_dir", payload.training_dir.as_deref(), now_at)
-        .await?;
+    upsert_setting(
+        state.db(),
+        "platform",
+        "platform_name",
+        payload.platform_name.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "platform",
+        "environment",
+        payload.environment.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "platform",
+        "upload_dir",
+        payload.upload_dir.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "platform",
+        "report_dir",
+        payload.report_dir.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "platform",
+        "training_dir",
+        payload.training_dir.as_deref(),
+        now_at,
+    )
+    .await?;
     get_platform_settings_view(State(state)).await
 }
 
@@ -2976,7 +4706,9 @@ async fn get_integrations_settings_view(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<IntegrationSettingsResponse>>, AppError> {
     let values = load_setting_map(state.db(), "integrations").await?;
-    Ok(ok(build_integration_settings_response(&state, &values).await))
+    Ok(ok(
+        build_integration_settings_response(&state, &values).await
+    ))
 }
 
 async fn save_integrations_settings(
@@ -2984,19 +4716,110 @@ async fn save_integrations_settings(
     Json(payload): Json<SaveIntegrationsSettingsRequest>,
 ) -> Result<Json<ApiResponse<IntegrationSettingsResponse>>, AppError> {
     let now_at = Utc::now();
-    upsert_setting(state.db(), "integrations", "hugegraph_base_url", payload.hugegraph_base_url.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "hugegraph_gremlin_url", payload.hugegraph_gremlin_url.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "milvus_address", payload.milvus_address.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "milvus_token", payload.milvus_token.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "milvus_collection", payload.milvus_collection.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "model_base_url", payload.model_base_url.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "model_name", payload.model_name.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "model_request_style", payload.model_request_style.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "model_chat_endpoint", payload.model_chat_endpoint.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "embedding_base_url", payload.embedding_base_url.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "embedding_model", payload.embedding_model.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "embedding_api_key", payload.embedding_api_key.as_deref(), now_at).await?;
-    upsert_setting(state.db(), "integrations", "embedding_endpoint", payload.embedding_endpoint.as_deref(), now_at).await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "hugegraph_base_url",
+        payload.hugegraph_base_url.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "hugegraph_gremlin_url",
+        payload.hugegraph_gremlin_url.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "milvus_address",
+        payload.milvus_address.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "milvus_token",
+        payload.milvus_token.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "milvus_collection",
+        payload.milvus_collection.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "model_base_url",
+        payload.model_base_url.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "model_name",
+        payload.model_name.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "model_request_style",
+        payload.model_request_style.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "model_chat_endpoint",
+        payload.model_chat_endpoint.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "embedding_base_url",
+        payload.embedding_base_url.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "embedding_model",
+        payload.embedding_model.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "embedding_api_key",
+        payload.embedding_api_key.as_deref(),
+        now_at,
+    )
+    .await?;
+    upsert_setting(
+        state.db(),
+        "integrations",
+        "embedding_endpoint",
+        payload.embedding_endpoint.as_deref(),
+        now_at,
+    )
+    .await?;
 
     if let Some(json_mode_supported) = payload.model_json_mode_supported {
         upsert_setting(
@@ -3009,9 +4832,28 @@ async fn save_integrations_settings(
         .await?;
     }
 
-    if let Some(api_key) = payload.openai_api_key.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
-        upsert_setting(state.db(), "integrations", "openai_api_key", Some(api_key), now_at).await?;
-        upsert_setting(state.db(), "integrations", "model_api_key_configured", Some("true"), now_at).await?;
+    if let Some(api_key) = payload
+        .openai_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        upsert_setting(
+            state.db(),
+            "integrations",
+            "openai_api_key",
+            Some(api_key),
+            now_at,
+        )
+        .await?;
+        upsert_setting(
+            state.db(),
+            "integrations",
+            "model_api_key_configured",
+            Some("true"),
+            now_at,
+        )
+        .await?;
     }
 
     get_integrations_settings_view(State(state)).await
@@ -3022,24 +4864,68 @@ async fn test_integrations_view(
     Json(payload): Json<TestIntegrationsRequest>,
 ) -> Result<Json<ApiResponse<IntegrationTestResponse>>, AppError> {
     let values = load_setting_map(state.db(), "integrations").await?;
-    let hugegraph = payload
-        .hugegraph_base_url
-        .unwrap_or_else(|| values.get("hugegraph_base_url").cloned().unwrap_or_else(|| state.settings().hugegraph.base_url.clone()));
-    let milvus = payload
-        .milvus_address
-        .unwrap_or_else(|| values.get("milvus_address").cloned().unwrap_or_else(|| state.settings().milvus.address.clone()));
-    let model_base = payload
-        .model_base_url
-        .unwrap_or_else(|| values.get("model_base_url").cloned().unwrap_or_else(|| state.settings().vllm.base_url.clone()));
-    let model_name = payload
-        .model_name
-        .unwrap_or_else(|| values.get("model_name").cloned().unwrap_or_else(|| state.settings().vllm.model_name.clone()));
-    let embedding_base = payload
-        .embedding_base_url
-        .unwrap_or_else(|| values.get("embedding_base_url").cloned().unwrap_or_else(|| state.settings().embedding.base_url.clone()));
-    let embedding_model = payload
-        .embedding_model
-        .unwrap_or_else(|| values.get("embedding_model").cloned().unwrap_or_else(|| state.settings().embedding.model_name.clone()));
+    let hugegraph = payload.hugegraph_base_url.unwrap_or_else(|| {
+        values
+            .get("hugegraph_base_url")
+            .cloned()
+            .unwrap_or_else(|| state.settings().hugegraph.base_url.clone())
+    });
+    let milvus = payload.milvus_address.unwrap_or_else(|| {
+        values
+            .get("milvus_address")
+            .cloned()
+            .unwrap_or_else(|| state.settings().milvus.address.clone())
+    });
+    let model_base = payload.model_base_url.unwrap_or_else(|| {
+        values
+            .get("model_base_url")
+            .cloned()
+            .unwrap_or_else(|| state.settings().vllm.base_url.clone())
+    });
+    let model_name = payload.model_name.unwrap_or_else(|| {
+        values
+            .get("model_name")
+            .cloned()
+            .unwrap_or_else(|| state.settings().vllm.model_name.clone())
+    });
+    let embedding_base = payload.embedding_base_url.unwrap_or_else(|| {
+        values
+            .get("embedding_base_url")
+            .cloned()
+            .unwrap_or_else(|| state.settings().embedding.base_url.clone())
+    });
+    let embedding_model = payload.embedding_model.unwrap_or_else(|| {
+        values
+            .get("embedding_model")
+            .cloned()
+            .unwrap_or_else(|| state.settings().embedding.model_name.clone())
+    });
+    let model_chat_endpoint = payload.model_chat_endpoint.unwrap_or_else(|| {
+        values
+            .get("model_chat_endpoint")
+            .cloned()
+            .unwrap_or_else(|| "/chat/completions".to_string())
+    });
+    let embedding_endpoint_path = payload.embedding_endpoint.unwrap_or_else(|| {
+        values
+            .get("embedding_endpoint")
+            .cloned()
+            .or_else(|| {
+                if !state.settings().embedding.endpoint.trim().is_empty() {
+                    Some(state.settings().embedding.endpoint.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "/embeddings".to_string())
+    });
+    let milvus_token = payload
+        .milvus_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| resolve_milvus_token(&state, &values));
     let api_key_configured = payload
         .openai_api_key
         .as_deref()
@@ -3060,14 +4946,18 @@ async fn test_integrations_view(
         milvus: IntegrationStatus {
             key: "milvus".to_string(),
             endpoint: milvus.clone(),
-            status: if milvus.trim().is_empty() { "not_configured" } else { "not_checked" }.to_string(),
+            status: milvus_probe_status(&state, &milvus, milvus_token.as_deref()).await,
             configured: !milvus.trim().is_empty(),
-            message: "Milvus probe is available but not fully validated in this environment".to_string(),
+            message: "Milvus REST v2 collection probe".to_string(),
         },
         model_service: ModelIntegrationStatus {
             key: "model_service".to_string(),
             endpoint: model_base.clone(),
-            status: endpoint_status(&state, &format!("{}/models", model_base.trim_end_matches('/'))).await,
+            status: endpoint_status(
+                &state,
+                &format!("{}/models", model_base.trim_end_matches('/')),
+            )
+            .await,
             configured: !model_base.trim().is_empty(),
             message: "OpenAI-compatible model probe".to_string(),
             request_style: values
@@ -3076,25 +4966,17 @@ async fn test_integrations_view(
                 .unwrap_or_else(|| "openai_chat_completion_compatible".to_string()),
             model: model_name,
             api_key_configured,
-            chat_endpoint: values
-                .get("model_chat_endpoint")
-                .cloned()
-                .unwrap_or_else(|| "/v1/chat/completions".to_string()),
+            chat_endpoint: model_chat_endpoint,
             json_mode_supported: bool_setting(&values, "model_json_mode_supported", true),
         },
         embedding_service: ModelIntegrationStatus {
             key: "embedding_service".to_string(),
             endpoint: embedding_base.clone(),
-            status: endpoint_status(
+            status: embedding_probe_status(
                 &state,
-                &format!(
-                    "{}{}",
-                    embedding_base.trim_end_matches('/'),
-                    values
-                        .get("embedding_endpoint")
-                        .cloned()
-                        .unwrap_or_else(|| "/embeddings".to_string())
-                ),
+                &embedding_base,
+                &embedding_endpoint_path,
+                &embedding_model,
             )
             .await,
             configured: !embedding_model.trim().is_empty(),
@@ -3108,7 +4990,7 @@ async fn test_integrations_view(
             chat_endpoint: values
                 .get("embedding_endpoint")
                 .cloned()
-                .unwrap_or_else(|| "/embeddings".to_string()),
+                .unwrap_or(embedding_endpoint_path),
             json_mode_supported: false,
         },
     }))
@@ -3203,13 +5085,14 @@ async fn ensure_workflow_run_exists(
     id: Uuid,
     stage_key: &str,
 ) -> Result<(), AppError> {
-    let count =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM workflow_runs WHERE id = $1 AND stage_key = $2")
-            .bind(id)
-            .bind(stage_key)
-            .fetch_one(db)
-            .await
-            .map_err(|_| AppError::Internal)?;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM workflow_runs WHERE id = $1 AND stage_key = $2",
+    )
+    .bind(id)
+    .bind(stage_key)
+    .fetch_one(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
     if count == 0 {
         return Err(AppError::NotFound);
     }
@@ -3249,6 +5132,481 @@ async fn insert_workflow_run(
     Ok(())
 }
 
+async fn ensure_import_exists(db: &sqlx::PgPool, import_id: Uuid) -> Result<(), AppError> {
+    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM imports WHERE id = $1")
+        .bind(import_id)
+        .fetch_one(db)
+        .await
+        .map_err(|_| AppError::Internal)?;
+    if count == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+fn spawn_ingestion_processing_job(state: AppState, job_id: Uuid, import_id: Uuid) {
+    tokio::spawn(async move {
+        let db = state.db();
+        let started_at = Utc::now();
+        let _ = mark_platform_job_running(
+            db,
+            job_id,
+            5,
+            "loading integration settings for import processing",
+            started_at,
+        )
+        .await;
+
+        let result = async {
+            let integration_values = load_setting_map(state.db(), "integrations").await?;
+            let ai_service = build_ai_service(&state, &integration_values);
+            let embedding_service = build_embedding_service(&state, &integration_values);
+            let vector_store = build_vector_store(&state, &integration_values);
+
+            let _ = update_platform_job_progress(
+                state.db(),
+                job_id,
+                20,
+                "processing import records into standardized risk cases",
+            )
+            .await;
+
+            let result = process_import_batch(
+                &state,
+                import_id,
+                &ai_service,
+                &embedding_service,
+                &vector_store,
+            )
+            .await?;
+
+            Ok::<serde_json::Value, AppError>(serde_json::json!({
+                "import_id": result.import_id,
+                "status": result.status,
+                "total_record_count": result.total_record_count,
+                "processed_record_count": result.processed_record_count,
+                "failed_record_count": result.failed_record_count,
+                "affected_case_count": result.affected_case_count,
+                "workflow_run_id": result.workflow_run_id,
+                "mapping_template_id": result.mapping_template_id,
+                "finished_at": result.finished_at
+            }))
+        }
+        .await;
+
+        match result {
+            Ok(result_json) => {
+                let message = format!(
+                    "processed {} / {} records into {} cases, failed {}",
+                    result_json
+                        .get("processed_record_count")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0),
+                    result_json
+                        .get("total_record_count")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0),
+                    result_json
+                        .get("affected_case_count")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0),
+                    result_json
+                        .get("failed_record_count")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0)
+                );
+                let _ = complete_platform_job(
+                    state.db(),
+                    job_id,
+                    Some(import_id),
+                    "completed",
+                    100,
+                    &message,
+                    result_json,
+                )
+                .await;
+            }
+            Err(error) => {
+                let _ = fail_platform_job(state.db(), job_id, &app_error_message(&error)).await;
+            }
+        }
+    });
+}
+
+fn spawn_extraction_job(state: AppState, job_id: Uuid, payload: CreateExtractionRunRequest) {
+    tokio::spawn(async move {
+        let started_at = Utc::now();
+        let _ = mark_platform_job_running(
+            state.db(),
+            job_id,
+            5,
+            "loading integration settings for knowledge extraction",
+            started_at,
+        )
+        .await;
+
+        let result = async {
+            let integration_values = load_setting_map(state.db(), "integrations").await?;
+            let ai_service = build_ai_service(&state, &integration_values);
+            let embedding_service = build_embedding_service(&state, &integration_values);
+            let graph_service = build_hugegraph_service(&state, &integration_values);
+            let vector_store = build_vector_store(&state, &integration_values);
+
+            let _ = update_platform_job_progress(
+                state.db(),
+                job_id,
+                15,
+                "running extraction, risk recommendation, graph sync and vector indexing",
+            )
+            .await;
+
+            let result = execute_extraction_run(
+                &state,
+                payload.case_ids,
+                payload.mode,
+                &ai_service,
+                &embedding_service,
+                &graph_service,
+                &vector_store,
+            )
+            .await?;
+
+            Ok::<(Uuid, serde_json::Value), AppError>((
+                result.run_id,
+                serde_json::json!({
+                    "run_id": result.run_id,
+                    "status": result.status,
+                    "item_count": result.item_count,
+                    "success_count": result.success_count,
+                    "failure_count": result.failure_count,
+                    "created_entity_count": result.created_entity_count,
+                    "created_relation_count": result.created_relation_count,
+                    "summary": result.summary,
+                    "finished_at": result.finished_at
+                }),
+            ))
+        }
+        .await;
+
+        match result {
+            Ok((run_id, result_json)) => {
+                let message = format!(
+                    "processed {} cases, created {} entities and {} relations",
+                    result_json
+                        .get("item_count")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0),
+                    result_json
+                        .get("created_entity_count")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0),
+                    result_json
+                        .get("created_relation_count")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0)
+                );
+                let _ = complete_platform_job(
+                    state.db(),
+                    job_id,
+                    Some(run_id),
+                    "completed",
+                    100,
+                    &message,
+                    result_json,
+                )
+                .await;
+            }
+            Err(error) => {
+                let _ = fail_platform_job(state.db(), job_id, &app_error_message(&error)).await;
+            }
+        }
+    });
+}
+
+fn spawn_report_job(state: AppState, job_id: Uuid, payload: CreateReportRequest) {
+    tokio::spawn(async move {
+        let started_at = Utc::now();
+        let _ = mark_platform_job_running(
+            state.db(),
+            job_id,
+            10,
+            "generating report through OpenAI-compatible model service",
+            started_at,
+        )
+        .await;
+
+        let result = create_report_record(&state, payload).await;
+        match result {
+            Ok(report) => {
+                let result_json = serde_json::json!({
+                    "report_id": report.id,
+                    "title": report.title,
+                    "report_type": report.report_type,
+                    "period": report.period,
+                    "status": report.status,
+                    "file_path": report.file_path,
+                    "summary": report.summary,
+                    "provider_style": report.provider_style,
+                    "model_name": report.model_name,
+                    "generated_at": report.generated_at
+                });
+                let _ = complete_platform_job(
+                    state.db(),
+                    job_id,
+                    Some(report.id),
+                    "completed",
+                    100,
+                    "report generated and persisted",
+                    result_json,
+                )
+                .await;
+            }
+            Err(error) => {
+                let _ = fail_platform_job(state.db(), job_id, &app_error_message(&error)).await;
+            }
+        }
+    });
+}
+
+async fn insert_platform_job(
+    db: &sqlx::PgPool,
+    job_id: Uuid,
+    job_type: &str,
+    target_type: &str,
+    target_id: Option<Uuid>,
+    request: serde_json::Value,
+    message: &str,
+) -> Result<JobDto, AppError> {
+    let now_at = Utc::now();
+    let request_json = json_to_string(request);
+    let row = sqlx::query_as::<_, JobRow>(
+        r#"
+        INSERT INTO platform_jobs (
+            id, job_type, target_type, target_id, status, progress_percent,
+            message, request_json, result_json, error_message, started_at,
+            finished_at, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, 'queued', 0, $5, $6, '{}', NULL, NULL, NULL, $7, $7)
+        RETURNING id, job_type, target_type, target_id, status, progress_percent,
+                  message, request_json, result_json, error_message, started_at,
+                  finished_at, created_at, updated_at
+        "#,
+    )
+    .bind(job_id)
+    .bind(job_type)
+    .bind(target_type)
+    .bind(target_id)
+    .bind(message)
+    .bind(request_json)
+    .bind(now_at)
+    .fetch_one(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(map_job_row(row))
+}
+
+async fn get_platform_job(db: &sqlx::PgPool, job_id: Uuid) -> Result<JobDto, AppError> {
+    let row = sqlx::query_as::<_, JobRow>(
+        r#"
+        SELECT id, job_type, target_type, target_id, status, progress_percent, message,
+               request_json, result_json, error_message, started_at, finished_at, created_at, updated_at
+        FROM platform_jobs
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or(AppError::NotFound)?;
+    Ok(map_job_row(row))
+}
+
+async fn mark_platform_job_running(
+    db: &sqlx::PgPool,
+    job_id: Uuid,
+    progress_percent: i32,
+    message: &str,
+    now_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE platform_jobs
+        SET status = 'running',
+            progress_percent = $2,
+            message = $3,
+            started_at = COALESCE(started_at, $4),
+            updated_at = $4
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .bind(progress_percent.clamp(0, 99))
+    .bind(message)
+    .bind(now_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+async fn update_platform_job_progress(
+    db: &sqlx::PgPool,
+    job_id: Uuid,
+    progress_percent: i32,
+    message: &str,
+) -> Result<(), AppError> {
+    let now_at = Utc::now();
+    sqlx::query(
+        r#"
+        UPDATE platform_jobs
+        SET progress_percent = $2,
+            message = $3,
+            updated_at = $4
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .bind(progress_percent.clamp(0, 99))
+    .bind(message)
+    .bind(now_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+async fn complete_platform_job(
+    db: &sqlx::PgPool,
+    job_id: Uuid,
+    target_id: Option<Uuid>,
+    status: &str,
+    progress_percent: i32,
+    message: &str,
+    result: serde_json::Value,
+) -> Result<(), AppError> {
+    let now_at = Utc::now();
+    sqlx::query(
+        r#"
+        UPDATE platform_jobs
+        SET status = $2,
+            target_id = COALESCE($3::UUID, target_id),
+            progress_percent = $4,
+            message = $5,
+            result_json = $6,
+            error_message = NULL,
+            finished_at = $7,
+            updated_at = $7
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .bind(status)
+    .bind(target_id)
+    .bind(progress_percent.clamp(0, 100))
+    .bind(message)
+    .bind(json_to_string(result))
+    .bind(now_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+async fn fail_platform_job(
+    db: &sqlx::PgPool,
+    job_id: Uuid,
+    error_message: &str,
+) -> Result<(), AppError> {
+    let now_at = Utc::now();
+    sqlx::query(
+        r#"
+        UPDATE platform_jobs
+        SET status = 'failed',
+            progress_percent = 100,
+            message = 'job failed',
+            error_message = $2,
+            finished_at = $3,
+            updated_at = $3
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .bind(error_message)
+    .bind(now_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+fn map_job_row(row: JobRow) -> JobDto {
+    JobDto {
+        id: row.id.to_string(),
+        job_type: row.job_type,
+        target_type: row.target_type,
+        target_id: row.target_id.map(|value| value.to_string()),
+        status: row.status,
+        progress_percent: row.progress_percent,
+        message: row.message,
+        request: parse_json_value(&row.request_json),
+        result: parse_json_value(&row.result_json),
+        error_message: row.error_message,
+        started_at: row.started_at.map(|value| value.to_rfc3339()),
+        finished_at: row.finished_at.map(|value| value.to_rfc3339()),
+        created_at: row.created_at.to_rfc3339(),
+        updated_at: row.updated_at.to_rfc3339(),
+    }
+}
+
+fn parse_json_value(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn json_to_string(value: serde_json::Value) -> String {
+    serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn app_error_message(error: &AppError) -> String {
+    match error {
+        AppError::Internal => "server internal error".to_string(),
+        AppError::NotFound => "resource not found".to_string(),
+        AppError::Validation(message) => message.clone(),
+        AppError::DependencyUnavailable(message) => {
+            format!("dependency unavailable: {message}")
+        }
+        AppError::Unauthorized => "unauthorized".to_string(),
+        AppError::Forbidden => "forbidden".to_string(),
+    }
+}
+
+async fn update_risk_case_graph_sync_status(
+    db: &sqlx::PgPool,
+    case_id: Uuid,
+    status: &str,
+    message: &str,
+    synced_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE risk_cases
+        SET graph_sync_status = $2,
+            graph_sync_message = $3,
+            graph_synced_at = $4,
+            updated_at = $4
+        WHERE id = $1
+        "#,
+    )
+    .bind(case_id)
+    .bind(status)
+    .bind(truncate_sync_message(message))
+    .bind(synced_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
 async fn load_mapping_field_rows(
     db: &sqlx::PgPool,
     template_id: Uuid,
@@ -3278,7 +5636,10 @@ async fn load_setting_map(
     .fetch_all(db)
     .await
     .map_err(|_| AppError::Internal)?;
-    Ok(rows.into_iter().map(|row| (row.setting_key, row.setting_value)).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.setting_key, row.setting_value))
+        .collect())
 }
 
 async fn upsert_setting(
@@ -3342,17 +5703,11 @@ async fn count_by_optional_status(
     }
 }
 
-async fn count_case(db: &sqlx::PgPool, table: &str, id: Uuid) -> Result<i64, AppError> {
-    let sql = format!("SELECT COUNT(*) FROM {table} WHERE id = $1");
-    sqlx::query_scalar::<_, i64>(&sql)
-        .bind(id)
+async fn check_postgres(db: &sqlx::PgPool) -> bool {
+    sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(db)
         .await
-        .map_err(|_| AppError::Internal)
-}
-
-async fn check_postgres(db: &sqlx::PgPool) -> bool {
-    sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(db).await.is_ok()
+        .is_ok()
 }
 
 async fn endpoint_status(state: &AppState, url: &str) -> String {
@@ -3373,6 +5728,82 @@ async fn endpoint_status(state: &AppState, url: &str) -> String {
     }
 }
 
+async fn embedding_probe_status(
+    state: &AppState,
+    base_url: &str,
+    endpoint: &str,
+    model: &str,
+) -> String {
+    if base_url.trim().is_empty() || model.trim().is_empty() {
+        return "not_configured".to_string();
+    }
+
+    let endpoint = if endpoint.starts_with('/') {
+        endpoint.to_string()
+    } else {
+        format!("/{endpoint}")
+    };
+    let url = format!("{}{}", base_url.trim_end_matches('/'), endpoint);
+    let payload = serde_json::json!({
+        "model": model,
+        "input": "JusticeAI embedding health check"
+    });
+
+    match state.http_client().post(url).json(&payload).send().await {
+        Ok(response) if response.status().is_success() => "up".to_string(),
+        Ok(_) => "degraded".to_string(),
+        Err(_) => "down".to_string(),
+    }
+}
+
+async fn milvus_probe_status(state: &AppState, address: &str, token: Option<&str>) -> String {
+    if address.trim().is_empty() {
+        return "not_configured".to_string();
+    }
+
+    let url = format!(
+        "{}/v2/vectordb/collections/list",
+        address.trim_end_matches('/')
+    );
+    let mut request = state.http_client().post(url).json(&serde_json::json!({}));
+    if let Some(token) = token.map(str::trim).filter(|value| !value.is_empty()) {
+        request = request.bearer_auth(token);
+    }
+
+    match request.send().await {
+        Ok(response) if response.status().is_success() => "up".to_string(),
+        Ok(_) => "degraded".to_string(),
+        Err(_) => "down".to_string(),
+    }
+}
+
+fn resolve_milvus_token(state: &AppState, values: &HashMap<String, String>) -> Option<String> {
+    values
+        .get("milvus_token")
+        .cloned()
+        .or_else(|| {
+            if !state.settings().milvus.token.trim().is_empty() {
+                Some(state.settings().milvus.token.clone())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if !state.settings().milvus.username.trim().is_empty()
+                && !state.settings().milvus.password.trim().is_empty()
+            {
+                Some(format!(
+                    "{}:{}",
+                    state.settings().milvus.username,
+                    state.settings().milvus.password
+                ))
+            } else {
+                None
+            }
+        })
+        .or_else(|| Some("root:Milvus".to_string()))
+}
+
 fn normalize_page(page: Option<i64>) -> i64 {
     page.unwrap_or(1).max(1)
 }
@@ -3388,10 +5819,14 @@ fn validate_mapping_template_payload(payload: &SaveMappingTemplateRequest) -> Re
         || payload.status.trim().is_empty()
         || payload.source_type.trim().is_empty()
     {
-        return Err(AppError::Validation("mapping template metadata is required".to_string()));
+        return Err(AppError::Validation(
+            "mapping template metadata is required".to_string(),
+        ));
     }
     if payload.fields.is_empty() {
-        return Err(AppError::Validation("at least one mapping field is required".to_string()));
+        return Err(AppError::Validation(
+            "at least one mapping field is required".to_string(),
+        ));
     }
     Ok(())
 }
@@ -3418,20 +5853,21 @@ fn compute_missing_required_fields(fields: &[MappingFieldDto]) -> Vec<String> {
 
 fn normalize_risk_case_status(value: &str) -> Result<&'static str, AppError> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "todo" | "pending_review" | "in_progress" | "disposed" | "closed" => {
-            Ok(Box::leak(value.trim().to_ascii_lowercase().into_boxed_str()))
-        }
+        "todo" | "pending_review" | "in_progress" | "disposed" | "closed" => Ok(Box::leak(
+            value.trim().to_ascii_lowercase().into_boxed_str(),
+        )),
         _ => Err(AppError::Validation(
-            "risk case status must be one of todo, pending_review, in_progress, disposed, closed".to_string(),
+            "risk case status must be one of todo, pending_review, in_progress, disposed, closed"
+                .to_string(),
         )),
     }
 }
 
 fn normalize_alert_status(value: &str) -> Result<&'static str, AppError> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "open" | "acknowledged" | "ignored" | "closed" => {
-            Ok(Box::leak(value.trim().to_ascii_lowercase().into_boxed_str()))
-        }
+        "open" | "acknowledged" | "ignored" | "closed" => Ok(Box::leak(
+            value.trim().to_ascii_lowercase().into_boxed_str(),
+        )),
         _ => Err(AppError::Validation(
             "alert status must be one of open, acknowledged, ignored, closed".to_string(),
         )),
@@ -3518,13 +5954,23 @@ fn split_csv_values(value: &str) -> Vec<String> {
 fn bool_setting(values: &HashMap<String, String>, key: &str, default: bool) -> bool {
     values
         .get(key)
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(default)
 }
 
 fn format_reference_case_hits(hits: &[SimilarCaseHit]) -> Vec<String> {
     hits.iter()
-        .map(|hit| format!("{} | {} | {} | {:.4}", hit.case_code, hit.title, hit.risk_level, hit.score))
+        .map(|hit| {
+            format!(
+                "{} | {} | {} | {:.4}",
+                hit.case_code, hit.title, hit.risk_level, hit.score
+            )
+        })
         .collect()
 }
 
@@ -3539,24 +5985,28 @@ fn map_similar_case_reference(hit: SimilarCaseHit) -> SimilarCaseReference {
     }
 }
 
-fn build_ai_service(state: &AppState, values: &HashMap<String, String>) -> OpenAiCompatibleAiService {
-    OpenAiCompatibleAiService::new(
+fn build_ai_service(
+    state: &AppState,
+    values: &HashMap<String, String>,
+) -> OpenAiCompatibleAiService {
+    OpenAiCompatibleAiService::new_with_endpoint(
         state.http_client().clone(),
         values
             .get("model_base_url")
             .cloned()
             .unwrap_or_else(|| state.settings().vllm.base_url.clone()),
         values
+            .get("model_chat_endpoint")
+            .cloned()
+            .unwrap_or_else(|| "/chat/completions".to_string()),
+        values
             .get("model_name")
             .cloned()
             .unwrap_or_else(|| state.settings().vllm.model_name.clone()),
-        values
-            .get("openai_api_key")
-            .cloned()
-            .or_else(|| {
-                (!state.settings().vllm.api_key.trim().is_empty())
-                    .then_some(state.settings().vllm.api_key.clone())
-            }),
+        values.get("openai_api_key").cloned().or_else(|| {
+            (!state.settings().vllm.api_key.trim().is_empty())
+                .then_some(state.settings().vllm.api_key.clone())
+        }),
     )
 }
 
@@ -3599,16 +6049,13 @@ fn build_embedding_service(
                 }
             })
             .unwrap_or_default(),
-        values
-            .get("embedding_api_key")
-            .cloned()
-            .or_else(|| {
-                if !state.settings().embedding.api_key.trim().is_empty() {
-                    Some(state.settings().embedding.api_key.clone())
-                } else {
-                    None
-                }
-            }),
+        values.get("embedding_api_key").cloned().or_else(|| {
+            if !state.settings().embedding.api_key.trim().is_empty() {
+                Some(state.settings().embedding.api_key.clone())
+            } else {
+                None
+            }
+        }),
     )
 }
 
@@ -3627,10 +6074,7 @@ fn build_hugegraph_service(
     )
 }
 
-fn build_vector_store(
-    state: &AppState,
-    values: &HashMap<String, String>,
-) -> MilvusVectorStore {
+fn build_vector_store(state: &AppState, values: &HashMap<String, String>) -> MilvusVectorStore {
     let token = values
         .get("milvus_token")
         .cloned()
@@ -3647,7 +6091,8 @@ fn build_vector_store(
             {
                 Some(format!(
                     "{}:{}",
-                    state.settings().milvus.username, state.settings().milvus.password
+                    state.settings().milvus.username,
+                    state.settings().milvus.password
                 ))
             } else {
                 None
@@ -3801,13 +6246,53 @@ async fn build_integration_settings_response(
             }
         })
         .unwrap_or_else(|| model_endpoint.clone());
+    let embedding_path = values
+        .get("embedding_endpoint")
+        .cloned()
+        .or_else(|| {
+            if !state.settings().embedding.endpoint.trim().is_empty() {
+                Some(state.settings().embedding.endpoint.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "/embeddings".to_string());
+    let embedding_model = values
+        .get("embedding_model")
+        .cloned()
+        .or_else(|| {
+            if !state.settings().embedding.model_name.trim().is_empty() {
+                Some(state.settings().embedding.model_name.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    let embedding_status_value = embedding_probe_status(
+        state,
+        &embedding_endpoint,
+        &embedding_path,
+        &embedding_model,
+    )
+    .await;
+    let milvus_status_value = milvus_probe_status(
+        state,
+        &milvus_endpoint,
+        resolve_milvus_token(state, values).as_deref(),
+    )
+    .await;
 
     IntegrationSettingsResponse {
         generated_at: now(),
         database: IntegrationStatus {
             key: "postgres".to_string(),
             endpoint: state.settings().database.url.clone(),
-            status: if check_postgres(state.db()).await { "up" } else { "down" }.to_string(),
+            status: if check_postgres(state.db()).await {
+                "up"
+            } else {
+                "down"
+            }
+            .to_string(),
             configured: true,
             message: "database connectivity is sourced from runtime settings".to_string(),
         },
@@ -3821,14 +6306,18 @@ async fn build_integration_settings_response(
         milvus: IntegrationStatus {
             key: "milvus".to_string(),
             endpoint: milvus_endpoint.clone(),
-            status: if milvus_endpoint.trim().is_empty() { "not_configured" } else { "not_checked" }.to_string(),
+            status: milvus_status_value,
             configured: !milvus_endpoint.trim().is_empty(),
             message: "Milvus vector index endpoint is configured".to_string(),
         },
         model_service: ModelIntegrationStatus {
             key: "model_service".to_string(),
             endpoint: model_endpoint.clone(),
-            status: endpoint_status(state, &format!("{}/models", model_endpoint.trim_end_matches('/'))).await,
+            status: endpoint_status(
+                state,
+                &format!("{}/models", model_endpoint.trim_end_matches('/')),
+            )
+            .await,
             configured: !model_endpoint.trim().is_empty(),
             message: "OpenAI-compatible ChatCompletion endpoint is configured".to_string(),
             request_style: values
@@ -3843,72 +6332,23 @@ async fn build_integration_settings_response(
             chat_endpoint: values
                 .get("model_chat_endpoint")
                 .cloned()
-                .unwrap_or_else(|| "/v1/chat/completions".to_string()),
+                .unwrap_or_else(|| "/chat/completions".to_string()),
             json_mode_supported: bool_setting(values, "model_json_mode_supported", true),
         },
         embedding_service: ModelIntegrationStatus {
             key: "embedding_service".to_string(),
             endpoint: embedding_endpoint.clone(),
-            status: endpoint_status(
-                state,
-                &format!(
-                    "{}{}",
-                    embedding_endpoint.trim_end_matches('/'),
-                    values
-                        .get("embedding_endpoint")
-                        .cloned()
-                        .or_else(|| {
-                            if !state.settings().embedding.endpoint.trim().is_empty() {
-                                Some(state.settings().embedding.endpoint.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_else(|| "/embeddings".to_string())
-                ),
-            )
-            .await,
-            configured: !values
-                .get("embedding_model")
-                .cloned()
-                .or_else(|| {
-                    if !state.settings().embedding.model_name.trim().is_empty() {
-                        Some(state.settings().embedding.model_name.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default()
-                .trim()
-                .is_empty(),
-            message: "OpenAI-compatible embeddings endpoint is configured for vector indexing".to_string(),
+            status: embedding_status_value,
+            configured: !embedding_model.trim().is_empty(),
+            message: "OpenAI-compatible embeddings endpoint is configured for vector indexing"
+                .to_string(),
             request_style: "openai_embeddings_compatible".to_string(),
-            model: values
-                .get("embedding_model")
-                .cloned()
-                .or_else(|| {
-                    if !state.settings().embedding.model_name.trim().is_empty() {
-                        Some(state.settings().embedding.model_name.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default(),
+            model: embedding_model,
             api_key_configured: values
                 .get("embedding_api_key")
                 .map(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| !state.settings().embedding.api_key.trim().is_empty()),
-            chat_endpoint: values
-                .get("embedding_endpoint")
-                .cloned()
-                .or_else(|| {
-                    if !state.settings().embedding.endpoint.trim().is_empty() {
-                        Some(state.settings().embedding.endpoint.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| "/embeddings".to_string()),
+            chat_endpoint: embedding_path,
             json_mode_supported: false,
         },
     }
@@ -3918,23 +6358,6 @@ fn metric_num(
     key: &str,
     label: &str,
     value: i64,
-    status: &str,
-    is_placeholder: bool,
-) -> SummaryMetric {
-    SummaryMetric {
-        key: key.to_string(),
-        label: label.to_string(),
-        value: serde_json::json!(value),
-        unit: None,
-        status: status.to_string(),
-        is_placeholder,
-    }
-}
-
-fn metric_bool(
-    key: &str,
-    label: &str,
-    value: bool,
     status: &str,
     is_placeholder: bool,
 ) -> SummaryMetric {
@@ -3977,4 +6400,8 @@ fn trend(period: &str, value: f64) -> TrendPoint {
 
 fn now() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn truncate_sync_message(message: &str) -> String {
+    message.trim().chars().take(1000).collect()
 }

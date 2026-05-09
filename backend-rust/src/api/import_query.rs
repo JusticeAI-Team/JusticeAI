@@ -110,7 +110,9 @@ fn resolve_import_list_page(page: i64, page_size: i64, total: i64) -> i64 {
     page.min(total_pages)
 }
 
-fn normalize_import_list_query(query: ImportListQuery) -> Result<NormalizedImportListQuery, AppError> {
+fn normalize_import_list_query(
+    query: ImportListQuery,
+) -> Result<NormalizedImportListQuery, AppError> {
     let page = query.page.unwrap_or(1).max(1);
 
     let raw_page_size = query.page_size.unwrap_or(20);
@@ -246,7 +248,10 @@ async fn get_import_detail(
     }))
 }
 
-async fn query_import_detail(db: &sqlx::PgPool, import_id: Uuid) -> Result<ImportDetailRow, AppError> {
+async fn query_import_detail(
+    db: &sqlx::PgPool,
+    import_id: Uuid,
+) -> Result<ImportDetailRow, AppError> {
     sqlx::query_as::<_, ImportDetailRow>(
         r#"
         SELECT id, source_type, status, created_at, updated_at
@@ -261,7 +266,10 @@ async fn query_import_detail(db: &sqlx::PgPool, import_id: Uuid) -> Result<Impor
     .ok_or(AppError::NotFound)
 }
 
-async fn query_import_files(db: &sqlx::PgPool, import_id: Uuid) -> Result<Vec<ImportFileItem>, AppError> {
+async fn query_import_files(
+    db: &sqlx::PgPool,
+    import_id: Uuid,
+) -> Result<Vec<ImportFileItem>, AppError> {
     sqlx::query_as::<_, ImportFileItem>(
         r#"
         SELECT id, original_filename, stored_filename, stored_path, file_size, mime_type, created_at
@@ -381,7 +389,9 @@ mod tests {
 
         let error = normalize_import_list_query(query).unwrap_err();
 
-        assert!(matches!(error, AppError::Validation(message) if message == "仅支持 uploaded 状态筛选"));
+        assert!(
+            matches!(error, AppError::Validation(message) if message == "仅支持 uploaded 状态筛选")
+        );
     }
 
     #[test]

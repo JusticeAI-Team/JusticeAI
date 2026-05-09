@@ -91,20 +91,23 @@ pub struct ReportOutput {
 pub struct OpenAiCompatibleAiService {
     client: Client,
     base_url: String,
+    chat_endpoint: String,
     preferred_model_name: String,
     api_key: Option<String>,
 }
 
 impl OpenAiCompatibleAiService {
-    pub fn new(
+    pub fn new_with_endpoint(
         client: Client,
         base_url: impl Into<String>,
+        chat_endpoint: impl Into<String>,
         preferred_model_name: impl Into<String>,
         api_key: Option<String>,
     ) -> Self {
         Self {
             client,
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            chat_endpoint: normalize_endpoint(chat_endpoint.into(), "/chat/completions"),
             preferred_model_name: preferred_model_name.into(),
             api_key: api_key
                 .map(|value| value.trim().to_string())
@@ -116,7 +119,7 @@ impl OpenAiCompatibleAiService {
         ModelContract {
             provider_style: "openai_chat_completion_compatible".to_string(),
             base_url: self.base_url.clone(),
-            chat_endpoint: "/chat/completions".to_string(),
+            chat_endpoint: self.chat_endpoint.clone(),
             model_name: self.preferred_model_name.clone(),
             json_mode_supported: false,
             api_key_configured: self.api_key.is_some(),
@@ -137,8 +140,12 @@ impl OpenAiCompatibleAiService {
             input.title, input.area_name, input.source_type, input.risk_level
         );
 
-        let system = "You are JusticeAI extraction engine. Return strict JSON only without explanation.";
-        let response = match self.chat_json::<ExtractionModelResponse>(system, &prompt, 0.0, 900).await {
+        let system =
+            "You are JusticeAI extraction engine. Return strict JSON only without explanation.";
+        let response = match self
+            .chat_json::<ExtractionModelResponse>(system, &prompt, 0.0, 900)
+            .await
+        {
             Ok(value) => value,
             Err(error) => {
                 warn!(error = %error, "AI extraction request failed, using deterministic fallback");
@@ -185,10 +192,7 @@ impl OpenAiCompatibleAiService {
         }
     }
 
-    pub async fn recommend_case_action(
-        &self,
-        input: &RecommendationInput,
-    ) -> RecommendationOutput {
+    pub async fn recommend_case_action(&self, input: &RecommendationInput) -> RecommendationOutput {
         let fallback = fallback_recommendation(input, self.configured_contract());
         let reference_cases = if input.reference_cases.is_empty() {
             "None".to_string()
@@ -245,22 +249,14 @@ impl OpenAiCompatibleAiService {
         );
 
         let system = "You are JusticeAI reporting engine. Return strict JSON only, and make content_markdown suitable for direct persistence.";
-        match self
-            .chat_json::<ReportModelResponse>(system, &prompt, 0.2, 1400)
-            .await
-        {
-            Ok(response)
-                if !response.summary.trim().is_empty()
-                    && !response.content_markdown.trim().is_empty() =>
-            {
-                ReportOutput {
-                    summary: response.summary.trim().to_string(),
-                    content: response.content_markdown.trim().to_string(),
-                    is_placeholder: false,
-                    model_contract: self.resolved_contract().await,
-                }
+        match self.chat_text(system, &prompt, 0.2, 1400).await {
+            Ok(text) => {
+                let contract = self.resolved_contract().await;
+                parse_report_model_output(input, &text, contract).unwrap_or_else(|error| {
+                    warn!(error = %error, "AI report response was unusable, using deterministic fallback");
+                    fallback
+                })
             }
-            Ok(_) => fallback,
             Err(error) => {
                 warn!(error = %error, "AI report request failed, using deterministic fallback");
                 fallback
@@ -295,10 +291,9 @@ impl OpenAiCompatibleAiService {
             return Ok(preferred.to_string());
         }
 
-        models
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("preferred model '{preferred}' not found and no fallback model available"))
+        models.into_iter().next().ok_or_else(|| {
+            format!("preferred model '{preferred}' not found and no fallback model available")
+        })
     }
 
     async fn fetch_models(&self) -> Result<Vec<String>, String> {
@@ -312,10 +307,13 @@ impl OpenAiCompatibleAiService {
         let status = response.status();
         let body = response.text().await.map_err(|error| error.to_string())?;
         if !status.is_success() {
-            return Err(format!("model discovery failed with status {status}: {body}"));
+            return Err(format!(
+                "model discovery failed with status {status}: {body}"
+            ));
         }
 
-        let parsed: ModelListResponse = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+        let parsed: ModelListResponse =
+            serde_json::from_str(&body).map_err(|error| error.to_string())?;
         Ok(parsed.data.into_iter().map(|model| model.id).collect())
     }
 
@@ -329,8 +327,23 @@ impl OpenAiCompatibleAiService {
     where
         T: for<'de> Deserialize<'de>,
     {
+        let text = self
+            .chat_text(system_prompt, user_prompt, temperature, max_tokens)
+            .await?;
+        let json_text = extract_json_block(&text)?;
+        serde_json::from_str(&json_text)
+            .map_err(|error| format!("failed to parse model JSON '{json_text}': {error}"))
+    }
+
+    async fn chat_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<String, String> {
         let model = self.resolve_model_name().await?;
-        let url = format!("{}/chat/completions", self.base_url);
+        let url = self.chat_url();
         let body = ChatCompletionRequest {
             model,
             messages: vec![
@@ -360,21 +373,33 @@ impl OpenAiCompatibleAiService {
         let status = response.status();
         let raw_body = response.text().await.map_err(|error| error.to_string())?;
         if !status.is_success() {
-            return Err(format!("chat completion failed with status {status}: {raw_body}"));
+            return Err(format!(
+                "chat completion failed with status {status}: {raw_body}"
+            ));
         }
 
-        let completion: ChatCompletionResponse =
-            serde_json::from_str(&raw_body).map_err(|error| format!("invalid completion body: {error}"))?;
-        let text = completion
+        let completion: ChatCompletionResponse = serde_json::from_str(&raw_body)
+            .map_err(|error| format!("invalid completion body: {error}"))?;
+        completion
             .choices
             .into_iter()
             .next()
-            .map(|choice| choice.message.content)
-            .map(normalize_chat_content)
-            .ok_or_else(|| "chat completion returned no choices".to_string())?;
-        let json_text = extract_json_block(&text)?;
-        serde_json::from_str(&json_text)
-            .map_err(|error| format!("failed to parse model JSON '{json_text}': {error}"))
+            .map(|choice| normalize_chat_content(choice.message.content))
+            .ok_or_else(|| "chat completion returned no choices".to_string())
+    }
+
+    fn chat_url(&self) -> String {
+        if self.chat_endpoint.starts_with("http://") || self.chat_endpoint.starts_with("https://") {
+            return self.chat_endpoint.clone();
+        }
+
+        let endpoint = if self.base_url.ends_with("/v1") && self.chat_endpoint.starts_with("/v1/") {
+            self.chat_endpoint.trim_start_matches("/v1").to_string()
+        } else {
+            self.chat_endpoint.clone()
+        };
+
+        format!("{}{}", self.base_url, endpoint)
     }
 }
 
@@ -449,7 +474,7 @@ struct RecommendationModelResponse {
 
 #[derive(Debug, Deserialize)]
 struct ReportModelResponse {
-    summary: String,
+    summary: serde_json::Value,
     content_markdown: String,
 }
 
@@ -469,6 +494,22 @@ fn normalize_chat_content(content: serde_json::Value) -> String {
             .collect::<Vec<_>>()
             .join(""),
         other => other.to_string(),
+    }
+}
+
+fn normalize_endpoint(value: impl Into<String>, default_value: &str) -> String {
+    let value = value.into();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return default_value.to_string();
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
     }
 }
 
@@ -533,6 +574,84 @@ fn normalize_disposal_advice(items: Vec<String>) -> Vec<String> {
     } else {
         normalized
     }
+}
+
+fn parse_report_model_output(
+    input: &ReportInput,
+    text: &str,
+    contract: ModelContract,
+) -> Result<ReportOutput, String> {
+    if let Ok(json_text) = extract_json_block(text) {
+        let response: ReportModelResponse = serde_json::from_str(&json_text)
+            .map_err(|error| format!("failed to parse report JSON '{json_text}': {error}"))?;
+        let content = response.content_markdown.trim();
+        if content.is_empty() {
+            return Err("report JSON did not include content_markdown".to_string());
+        }
+        return Ok(ReportOutput {
+            summary: summarize_report_value(&response.summary, content),
+            content: content.to_string(),
+            is_placeholder: false,
+            model_contract: contract,
+        });
+    }
+
+    let content = text.trim();
+    if content.is_empty() {
+        return Err("empty report model response".to_string());
+    }
+
+    Ok(ReportOutput {
+        summary: first_non_empty_line(content).unwrap_or_else(|| {
+            format!(
+                "{} for {} covers {} cases, {} high-risk cases, {} alerts and {} dispatch tasks.",
+                input.report_type,
+                input.period,
+                input.case_count,
+                input.high_risk_count,
+                input.alert_count,
+                input.dispatch_count
+            )
+        }),
+        content: content.to_string(),
+        is_placeholder: false,
+        model_contract: contract,
+    })
+}
+
+fn summarize_report_value(value: &serde_json::Value, content_markdown: &str) -> String {
+    match value {
+        serde_json::Value::String(text) if !text.trim().is_empty() => text.trim().to_string(),
+        serde_json::Value::Object(map) if !map.is_empty() => map
+            .iter()
+            .map(|(key, value)| match value {
+                serde_json::Value::String(text) => format!("{key}: {text}"),
+                serde_json::Value::Number(number) => format!("{key}: {number}"),
+                serde_json::Value::Bool(flag) => format!("{key}: {flag}"),
+                _ => format!("{key}: {}", compact_json_value(value)),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        serde_json::Value::Array(items) if !items.is_empty() => items
+            .iter()
+            .map(compact_json_value)
+            .collect::<Vec<_>>()
+            .join("; "),
+        _ => first_non_empty_line(content_markdown)
+            .unwrap_or_else(|| "AI report generated through OpenAI-compatible service".to_string()),
+    }
+}
+
+fn compact_json_value(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn first_non_empty_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.trim_start_matches('#').trim().to_string())
+        .filter(|line| !line.is_empty())
 }
 
 fn clamp_confidence(confidence: f64) -> f64 {
@@ -642,7 +761,10 @@ fn fallback_recommendation(
             input.title, input.risk_level, input.area_name, input.source_type, references
         ),
         disposal_advice: vec![
-            format!("verify whether {} is recurring in {}", input.title, input.area_name),
+            format!(
+                "verify whether {} is recurring in {}",
+                input.title, input.area_name
+            ),
             "coordinate disposal and supervision with the responsible department".to_string(),
             "track alert closure and resident feedback in the next reporting cycle".to_string(),
         ],
@@ -716,5 +838,92 @@ mod tests {
             { "text": " world" }
         ]);
         assert_eq!(normalize_chat_content(value), "hello world");
+    }
+
+    #[test]
+    fn report_output_accepts_object_summary() {
+        let contract = test_contract();
+        let input = test_report_input();
+
+        let output = parse_report_model_output(
+            &input,
+            r##"{
+              "summary": {"total_cases": 40, "high_risk_cases": 6},
+              "content_markdown": "# 验证报告\n\n模型生成正文"
+            }"##,
+            contract,
+        )
+        .unwrap();
+
+        assert!(!output.is_placeholder);
+        assert!(output.summary.contains("total_cases: 40"));
+        assert!(output.content.contains("模型生成正文"));
+    }
+
+    #[test]
+    fn report_output_accepts_markdown_without_json() {
+        let output =
+            parse_report_model_output(&test_report_input(), "# 周报\n\n模型正文", test_contract())
+                .unwrap();
+
+        assert!(!output.is_placeholder);
+        assert_eq!(output.summary, "周报");
+        assert!(output.content.contains("模型正文"));
+    }
+
+    fn test_contract() -> ModelContract {
+        ModelContract {
+            provider_style: "openai_chat_completion_compatible".to_string(),
+            base_url: "http://localhost:8000/v1".to_string(),
+            chat_endpoint: "/chat/completions".to_string(),
+            model_name: "local-model".to_string(),
+            json_mode_supported: false,
+            api_key_configured: false,
+            is_placeholder: false,
+        }
+    }
+
+    fn test_report_input() -> ReportInput {
+        ReportInput {
+            title: "验证报告".to_string(),
+            report_type: "weekly".to_string(),
+            period: "2026-W19".to_string(),
+            case_count: 40,
+            high_risk_count: 6,
+            alert_count: 31,
+            dispatch_count: 8,
+        }
+    }
+
+    #[test]
+    fn chat_url_avoids_duplicate_v1_prefix_for_legacy_endpoint() {
+        let service = OpenAiCompatibleAiService::new_with_endpoint(
+            Client::new(),
+            "http://localhost:8000/v1",
+            "/v1/chat/completions",
+            "qwen",
+            None,
+        );
+
+        assert_eq!(
+            service.chat_url(),
+            "http://localhost:8000/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn chat_url_accepts_full_custom_endpoint() {
+        let service = OpenAiCompatibleAiService::new_with_endpoint(
+            Client::new(),
+            "http://localhost:8000/v1",
+            "http://proxy.internal/openai/chat/completions",
+            "qwen",
+            None,
+        );
+
+        assert_eq!(
+            service.chat_url(),
+            "http://proxy.internal/openai/chat/completions"
+        );
     }
 }

@@ -142,7 +142,7 @@ async fn system_info(State(state): State<AppState>) -> axum::Json<ApiResponse<Sy
                 .cloned()
                 .unwrap_or_else(|| settings.vllm.model_name.clone()),
             request_style: "openai_chat_completion_compatible",
-            chat_endpoint: "/v1/chat/completions",
+            chat_endpoint: "/chat/completions",
         },
         storage: StorageInfo {
             upload_dir: platform_values

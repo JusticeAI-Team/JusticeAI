@@ -103,7 +103,8 @@ impl MilvusVectorStore {
             ]
         });
 
-        self.post_json("/v2/vectordb/entities/upsert", payload).await?;
+        self.post_json("/v2/vectordb/entities/upsert", payload)
+            .await?;
         Ok(VectorSyncResult {
             status: "indexed".to_string(),
             message: format!("indexed case {} into Milvus", document.case_code),
@@ -134,7 +135,9 @@ impl MilvusVectorStore {
             "outputFields": ["id", "case_id", "case_code", "title", "risk_level"]
         });
 
-        let response = self.post_json("/v2/vectordb/entities/search", payload).await?;
+        let response = self
+            .post_json("/v2/vectordb/entities/search", payload)
+            .await?;
         let mut hits = parse_search_hits(response);
         if let Some(exclude_case_id) = query.exclude_case_id.as_deref() {
             hits.retain(|hit| hit.case_id != exclude_case_id);
@@ -177,9 +180,14 @@ impl MilvusVectorStore {
             ]
         });
 
-        match self.post_json("/v2/vectordb/collections/create", payload).await {
+        match self
+            .post_json("/v2/vectordb/collections/create", payload)
+            .await
+        {
             Ok(_) => Ok(()),
-            Err(error) if error.contains("already exist") || error.contains("already exists") => Ok(()),
+            Err(error) if error.contains("already exist") || error.contains("already exists") => {
+                Ok(())
+            }
             Err(error) => Err(error),
         }?;
 
@@ -192,7 +200,11 @@ impl MilvusVectorStore {
         Ok(())
     }
 
-    async fn post_json(&self, path: &str, payload: serde_json::Value) -> Result<serde_json::Value, String> {
+    async fn post_json(
+        &self,
+        path: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         let url = format!("{}{}", self.address, path);
         let mut request = self.client.post(url).json(&payload);
         if let Some(token) = &self.token {
@@ -203,11 +215,13 @@ impl MilvusVectorStore {
         let status = response.status();
         let body = response.text().await.map_err(|error| error.to_string())?;
         if !status.is_success() {
-            return Err(format!("Milvus request failed with status {status}: {body}"));
+            return Err(format!(
+                "Milvus request failed with status {status}: {body}"
+            ));
         }
 
-        let value: serde_json::Value =
-            serde_json::from_str(&body).map_err(|error| format!("invalid Milvus response: {error}: {body}"))?;
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| format!("invalid Milvus response: {error}: {body}"))?;
         if let Some(code) = value.get("code").and_then(serde_json::Value::as_i64) {
             if code != 0 && code != 200 {
                 return Err(format!("Milvus returned non-zero code {code}: {body}"));
@@ -236,18 +250,43 @@ fn parse_search_hits(value: serde_json::Value) -> Vec<SimilarCaseHit> {
                 .and_then(serde_json::Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            let id = string_field(&entry, "id").or_else(|| entity.get("id").and_then(serde_json::Value::as_str).map(str::to_string))?;
+            let id = string_field(&entry, "id").or_else(|| {
+                entity
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })?;
             let case_id = string_field(&entry, "case_id")
-                .or_else(|| entity.get("case_id").and_then(serde_json::Value::as_str).map(str::to_string))
+                .or_else(|| {
+                    entity
+                        .get("case_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
                 .unwrap_or_default();
             let case_code = string_field(&entry, "case_code")
-                .or_else(|| entity.get("case_code").and_then(serde_json::Value::as_str).map(str::to_string))
+                .or_else(|| {
+                    entity
+                        .get("case_code")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
                 .unwrap_or_default();
             let title = string_field(&entry, "title")
-                .or_else(|| entity.get("title").and_then(serde_json::Value::as_str).map(str::to_string))
+                .or_else(|| {
+                    entity
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
                 .unwrap_or_default();
             let risk_level = string_field(&entry, "risk_level")
-                .or_else(|| entity.get("risk_level").and_then(serde_json::Value::as_str).map(str::to_string))
+                .or_else(|| {
+                    entity
+                        .get("risk_level")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
                 .unwrap_or_default();
             let score = entry
                 .get("distance")
@@ -268,7 +307,10 @@ fn parse_search_hits(value: serde_json::Value) -> Vec<SimilarCaseHit> {
 }
 
 fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
-    value.get(key).and_then(serde_json::Value::as_str).map(str::to_string)
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 #[cfg(test)]

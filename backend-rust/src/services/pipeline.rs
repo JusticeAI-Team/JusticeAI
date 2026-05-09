@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::BufReader,
     path::Path,
@@ -80,6 +80,7 @@ struct MappingFieldConfig {
 #[derive(Debug, Default)]
 struct ImportRecordContext {
     title: Option<String>,
+    source_type: Option<String>,
     area_name: Option<String>,
     occurred_at: Option<DateTime<Utc>>,
     assignee: Option<String>,
@@ -108,14 +109,13 @@ pub async fn process_import_batch(
     embedding_service: &OpenAiCompatibleEmbeddingService,
     vector_store: &MilvusVectorStore,
 ) -> Result<ProcessImportResult, AppError> {
-    let import_row = sqlx::query_as::<_, ImportRow>(
-        "SELECT source_type FROM imports WHERE id = $1",
-    )
-    .bind(import_id)
-    .fetch_optional(state.db())
-    .await
-    .map_err(|_| AppError::Internal)?
-    .ok_or(AppError::NotFound)?;
+    let import_row =
+        sqlx::query_as::<_, ImportRow>("SELECT source_type FROM imports WHERE id = $1")
+            .bind(import_id)
+            .fetch_optional(state.db())
+            .await
+            .map_err(|_| AppError::Internal)?
+            .ok_or(AppError::NotFound)?;
 
     let files = sqlx::query_as::<_, ImportFileRow>(
         r#"
@@ -137,7 +137,8 @@ pub async fn process_import_batch(
     }
 
     let now_at = Utc::now();
-    let mapping_template_id = latest_mapping_template_id(state.db(), &import_row.source_type).await?;
+    let mapping_template_id =
+        latest_mapping_template_id(state.db(), &import_row.source_type).await?;
     let mapping_fields = load_mapping_fields(state.db(), mapping_template_id).await?;
     let workflow_run_id = Uuid::new_v4();
     let upload_dir = state.settings().storage.upload_dir.clone();
@@ -172,6 +173,10 @@ pub async fn process_import_batch(
         for record in records {
             row_index += 1;
             let context = build_import_record_context(&record, &mapping_fields);
+            let case_source_type = context
+                .source_type
+                .clone()
+                .unwrap_or_else(|| import_row.source_type.clone());
             let title = context
                 .title
                 .unwrap_or_else(|| format!("{}-lead-{}", file.original_filename, row_index));
@@ -181,7 +186,7 @@ pub async fn process_import_batch(
             let occurred_at = context.occurred_at.unwrap_or(now_at);
             let risk_score = context
                 .risk_score
-                .unwrap_or_else(|| default_risk_score(row_index, &import_row.source_type))
+                .unwrap_or_else(|| default_risk_score(row_index, &case_source_type))
                 .clamp(0.0, 100.0);
             let risk_level = normalize_risk_level(
                 context
@@ -189,9 +194,14 @@ pub async fn process_import_batch(
                     .as_deref()
                     .unwrap_or(risk_level_from_score(risk_score)),
             );
-            let status = normalize_case_status(context.status.as_deref().unwrap_or("pending_review"))?;
-            let alert_status =
-                normalize_alert_status(context.alert_status.as_deref().unwrap_or(default_alert_status(risk_level)))?;
+            let status =
+                normalize_case_status(context.status.as_deref().unwrap_or("pending_review"))?;
+            let alert_status = normalize_alert_status(
+                context
+                    .alert_status
+                    .as_deref()
+                    .unwrap_or(default_alert_status(risk_level)),
+            )?;
             let due_at = occurred_at + Duration::days(3 + i64::from(row_index % 4));
             let case_code = format!(
                 "IMP-{}-{:04}",
@@ -200,42 +210,36 @@ pub async fn process_import_batch(
             );
 
             let similar_cases = vector_store
-                .search_similar_cases(
-                    &VectorSearchQuery {
-                        embedding: embed_for_similarity(
-                            embedding_service,
-                            &format!(
-                                "{}\n{}\n{}\n{}",
-                                title, area_name, import_row.source_type, risk_level
-                            ),
-                        )
-                        .await
-                        .unwrap_or_default(),
-                        exclude_case_id: None,
-                        limit: 3,
-                    },
-                )
+                .search_similar_cases(&VectorSearchQuery {
+                    embedding: embed_for_similarity(
+                        embedding_service,
+                        &format!(
+                            "{}\n{}\n{}\n{}",
+                            title, area_name, case_source_type, risk_level
+                        ),
+                    )
+                    .await
+                    .unwrap_or_default(),
+                    exclude_case_id: None,
+                    limit: 3,
+                })
                 .await
                 .unwrap_or_default();
 
             let recommendation = ai_service
                 .recommend_case_action(&RecommendationInput {
-                title: title.clone(),
-                area_name: area_name.clone(),
-                risk_level: risk_level.to_string(),
-                source_type: import_row.source_type.clone(),
-                entity_count: 0,
-                alert_count: 0,
-                dispatch_count: 0,
-                reference_cases: format_reference_cases(&similar_cases),
+                    title: title.clone(),
+                    area_name: area_name.clone(),
+                    risk_level: risk_level.to_string(),
+                    source_type: case_source_type.clone(),
+                    entity_count: 0,
+                    alert_count: 0,
+                    dispatch_count: 0,
+                    reference_cases: format_reference_cases(&similar_cases),
                 })
                 .await;
 
-            let risk_tags = if context.risk_tags.is_empty() {
-                default_risk_tags(&import_row.source_type, risk_level)
-            } else {
-                context.risk_tags.join(",")
-            };
+            let risk_tags = compose_risk_tags(&case_source_type, risk_level, &context.risk_tags);
 
             let case_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
@@ -277,7 +281,7 @@ pub async fn process_import_batch(
             .bind(import_id)
             .bind(&case_code)
             .bind(&title)
-            .bind(&import_row.source_type)
+            .bind(&case_source_type)
             .bind(&area_name)
             .bind(risk_level)
             .bind(risk_score)
@@ -305,7 +309,7 @@ pub async fn process_import_batch(
                 title: title.clone(),
                 summary: recommendation.reason_summary.clone(),
                 risk_level: risk_level.to_string(),
-                source_type: import_row.source_type.clone(),
+                source_type: case_source_type.clone(),
                 area_name: area_name.clone(),
             });
 
@@ -322,7 +326,11 @@ pub async fn process_import_batch(
         }
     }
 
-    let final_status = if processed_record_count > 0 { "processed" } else { "failed" };
+    let final_status = if processed_record_count > 0 {
+        "processed"
+    } else {
+        "failed"
+    };
     if processed_record_count == 0 {
         failed_record_count = total_record_count;
     }
@@ -354,8 +362,14 @@ pub async fn process_import_batch(
 
     for document in &vector_documents {
         let sync = sync_case_vector(embedding_service, vector_store, document).await;
-        update_case_vector_sync(state.db(), parse_uuid(&document.case_id), &sync.status, &sync.message, Utc::now())
-            .await?;
+        update_case_vector_sync(
+            state.db(),
+            parse_uuid(&document.case_id),
+            &sync.status,
+            &sync.message,
+            Utc::now(),
+        )
+        .await?;
     }
 
     Ok(ProcessImportResult {
@@ -384,6 +398,7 @@ pub async fn execute_extraction_run(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "incremental".to_string());
+    let selected_case_ids = case_ids.is_some();
     let cases = if let Some(case_ids) = case_ids {
         if case_ids.is_empty() {
             return Err(AppError::Validation("case_ids cannot be empty".to_string()));
@@ -418,7 +433,7 @@ pub async fn execute_extraction_run(
     let now_at = Utc::now();
     let run_id = Uuid::new_v4();
     let workflow_run_id = Uuid::new_v4();
-    let scope_type = if case_ids_is_selected(&cases) {
+    let scope_type = if selected_case_ids {
         "selected_cases"
     } else {
         "all_recent_cases"
@@ -467,7 +482,9 @@ pub async fn execute_extraction_run(
     let mut success_count = 0_i32;
     let mut graph_sync_inputs = Vec::new();
     let mut vector_documents = Vec::new();
+    let mut graph_sync_messages = Vec::new();
     let mut graph_sync_failures = Vec::new();
+    let mut vector_sync_messages = Vec::new();
     let mut vector_sync_failures = Vec::new();
     let mut extraction_summaries = Vec::new();
 
@@ -476,10 +493,10 @@ pub async fn execute_extraction_run(
 
         let extracted = ai_service
             .extract_case_graph(&ExtractionInput {
-            title: case.title.clone(),
-            area_name: case.area_name.clone(),
-            source_type: case.source_type.clone(),
-            risk_level: case.risk_level.clone(),
+                title: case.title.clone(),
+                area_name: case.area_name.clone(),
+                source_type: case.source_type.clone(),
+                risk_level: case.risk_level.clone(),
             })
             .await;
         let crate::services::ai::ExtractionOutput {
@@ -530,34 +547,32 @@ pub async fn execute_extraction_run(
         }
 
         let similar_cases = vector_store
-            .search_similar_cases(
-                &VectorSearchQuery {
-                    embedding: embed_for_similarity(
-                        embedding_service,
-                        &format!(
-                            "{}\n{}\n{}\n{}",
-                            case.title, case.area_name, case.source_type, case.risk_level
-                        ),
-                    )
-                    .await
-                    .unwrap_or_default(),
-                    exclude_case_id: Some(case.id.to_string()),
-                    limit: 3,
-                },
-            )
+            .search_similar_cases(&VectorSearchQuery {
+                embedding: embed_for_similarity(
+                    embedding_service,
+                    &format!(
+                        "{}\n{}\n{}\n{}",
+                        case.title, case.area_name, case.source_type, case.risk_level
+                    ),
+                )
+                .await
+                .unwrap_or_default(),
+                exclude_case_id: Some(case.id.to_string()),
+                limit: 3,
+            })
             .await
             .unwrap_or_default();
 
         let recommendation = ai_service
             .recommend_case_action(&RecommendationInput {
-            title: case.title.clone(),
-            area_name: case.area_name.clone(),
-            risk_level: case.risk_level.clone(),
-            source_type: case.source_type.clone(),
-            entity_count: entity_ids.len(),
-            alert_count: current_case_alert_count(&mut tx, case.id).await?,
-            dispatch_count: current_case_dispatch_count(&mut tx, case.id).await?,
-            reference_cases: format_reference_cases(&similar_cases),
+                title: case.title.clone(),
+                area_name: case.area_name.clone(),
+                risk_level: case.risk_level.clone(),
+                source_type: case.source_type.clone(),
+                entity_count: entity_ids.len(),
+                alert_count: current_case_alert_count(&mut tx, case.id).await?,
+                dispatch_count: current_case_dispatch_count(&mut tx, case.id).await?,
+                reference_cases: format_reference_cases(&similar_cases),
             })
             .await;
 
@@ -582,7 +597,9 @@ pub async fn execute_extraction_run(
 
         let mut graph_relations = Vec::new();
         for relation in relations {
-            if relation.source_index >= entity_ids.len() || relation.target_index >= entity_ids.len() {
+            if relation.source_index >= entity_ids.len()
+                || relation.target_index >= entity_ids.len()
+            {
                 continue;
             }
 
@@ -662,7 +679,11 @@ pub async fn execute_extraction_run(
         "#,
     )
     .bind(run_id)
-    .bind(if failure_count > 0 { "completed_with_warnings" } else { "completed" })
+    .bind(if failure_count > 0 {
+        "completed_with_warnings"
+    } else {
+        "completed"
+    })
     .bind(cases.len() as i32)
     .bind(success_count)
     .bind(failure_count)
@@ -685,7 +706,11 @@ pub async fn execute_extraction_run(
         "#,
     )
     .bind(workflow_run_id)
-    .bind(if failure_count > 0 { "attention" } else { "completed" })
+    .bind(if failure_count > 0 {
+        "attention"
+    } else {
+        "completed"
+    })
     .bind(now_at)
     .bind(cases.len() as i32)
     .bind(success_count)
@@ -704,11 +729,20 @@ pub async fn execute_extraction_run(
                     "{} (vertices={}, edges={})",
                     result.message, result.vertex_count, result.edge_count
                 );
-                update_case_graph_sync(state.db(), case_id, &result.status, &sync_message, Utc::now()).await?;
+                graph_sync_messages.push(sync_message.clone());
+                update_case_graph_sync(
+                    state.db(),
+                    case_id,
+                    &result.status,
+                    &sync_message,
+                    Utc::now(),
+                )
+                .await?;
             }
             Err(error) => {
                 let case_id = parse_uuid(&input.case_id);
                 update_case_graph_sync(state.db(), case_id, "failed", &error, Utc::now()).await?;
+                graph_sync_messages.push(error.clone());
                 graph_sync_failures.push(error);
             }
         }
@@ -716,19 +750,40 @@ pub async fn execute_extraction_run(
     for document in &vector_documents {
         let sync = sync_case_vector(embedding_service, vector_store, document).await;
         let case_id = parse_uuid(&document.case_id);
-        update_case_vector_sync(state.db(), case_id, &sync.status, &sync.message, Utc::now()).await?;
+        update_case_vector_sync(state.db(), case_id, &sync.status, &sync.message, Utc::now())
+            .await?;
+        vector_sync_messages.push(sync.message.clone());
         if sync.status != "indexed" {
             vector_sync_failures.push(sync.message);
         }
     }
 
+    let graph_sync_message = if graph_sync_failures.is_empty() {
+        join_messages(&graph_sync_messages)
+    } else {
+        join_messages(&graph_sync_failures)
+    };
+    let vector_sync_message = if vector_sync_failures.is_empty() {
+        join_messages(&vector_sync_messages)
+    } else {
+        join_messages(&vector_sync_failures)
+    };
+
     update_extraction_run_sync_status(
         state.db(),
         run_id,
-        if graph_sync_failures.is_empty() { "synced" } else { "failed" },
-        &join_messages(&graph_sync_failures),
-        if vector_sync_failures.is_empty() { "indexed" } else { "failed" },
-        &join_messages(&vector_sync_failures),
+        if graph_sync_failures.is_empty() {
+            "synced"
+        } else {
+            "failed"
+        },
+        &graph_sync_message,
+        if vector_sync_failures.is_empty() {
+            "indexed"
+        } else {
+            "failed"
+        },
+        &vector_sync_message,
     )
     .await?;
 
@@ -1010,7 +1065,8 @@ fn parse_import_rows(
 }
 
 fn parse_csv_rows(path: &Path) -> Result<Vec<HashMap<String, String>>, AppError> {
-    let file = File::open(path).map_err(|_| AppError::Validation("failed to read csv file".to_string()))?;
+    let file = File::open(path)
+        .map_err(|_| AppError::Validation("failed to read csv file".to_string()))?;
     let mut reader = csv::Reader::from_reader(BufReader::new(file));
     let headers = reader
         .headers()
@@ -1019,7 +1075,8 @@ fn parse_csv_rows(path: &Path) -> Result<Vec<HashMap<String, String>>, AppError>
 
     let mut rows = Vec::new();
     for record in reader.records() {
-        let record = record.map_err(|_| AppError::Validation("failed to parse csv row".to_string()))?;
+        let record =
+            record.map_err(|_| AppError::Validation("failed to parse csv row".to_string()))?;
         rows.push(build_row_map(&headers, &record));
     }
 
@@ -1031,35 +1088,53 @@ fn parse_csv_rows(path: &Path) -> Result<Vec<HashMap<String, String>>, AppError>
 }
 
 fn parse_excel_rows(path: &Path) -> Result<Vec<HashMap<String, String>>, AppError> {
-    let mut workbook =
-        open_workbook_auto(path).map_err(|_| AppError::Validation("failed to read excel file".to_string()))?;
-    let sheet_name = workbook
-        .sheet_names()
-        .first()
-        .cloned()
-        .ok_or_else(|| AppError::Validation("excel workbook does not contain sheets".to_string()))?;
-    let range = workbook
-        .worksheet_range(&sheet_name)
-        .map_err(|_| AppError::Validation("failed to parse excel sheet".to_string()))?;
-
-    let mut rows_iter = range.rows();
-    let headers = rows_iter
-        .next()
-        .ok_or_else(|| AppError::Validation("excel file does not contain a header row".to_string()))?
-        .iter()
-        .map(cell_to_string)
-        .collect::<Vec<_>>();
-
+    let mut workbook = open_workbook_auto(path)
+        .map_err(|_| AppError::Validation("failed to read excel file".to_string()))?;
+    let sheet_names = workbook.sheet_names().to_vec();
+    if sheet_names.is_empty() {
+        return Err(AppError::Validation(
+            "excel workbook does not contain sheets".to_string(),
+        ));
+    }
     let mut rows = Vec::new();
-    for row in rows_iter {
-        let mut values = row.iter().map(cell_to_string).collect::<Vec<_>>();
-        if values.iter().all(|value| value.trim().is_empty()) {
+
+    for (sheet_index, sheet_name) in sheet_names.iter().enumerate() {
+        let range = workbook.worksheet_range(sheet_name).map_err(|_| {
+            AppError::Validation(format!("failed to parse excel sheet: {sheet_name}"))
+        })?;
+        let sheet_rows = range
+            .rows()
+            .map(|row| row.iter().map(cell_to_string).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+
+        let Some(header_index) = detect_header_row(&sheet_rows) else {
+            if let Some(row) = build_image_sheet_placeholder(sheet_name, sheet_index + 1) {
+                rows.push(row);
+            }
             continue;
+        };
+
+        let headers = normalize_excel_headers(&sheet_rows, header_index);
+        let mut sheet_data_count = 0_usize;
+        for (row_offset, row) in sheet_rows.iter().enumerate().skip(header_index + 1) {
+            let mut values = row.clone();
+            if values.iter().all(|value| value.trim().is_empty()) {
+                continue;
+            }
+            if values.len() < headers.len() {
+                values.resize(headers.len(), String::new());
+            }
+            let mut mapped = build_row_map_from_vecs(&headers, &values);
+            enrich_excel_row_metadata(&mut mapped, sheet_name, sheet_index + 1, row_offset + 1);
+            rows.push(mapped);
+            sheet_data_count += 1;
         }
-        if values.len() < headers.len() {
-            values.resize(headers.len(), String::new());
+
+        if sheet_data_count == 0 {
+            if let Some(row) = build_image_sheet_placeholder(sheet_name, sheet_index + 1) {
+                rows.push(row);
+            }
         }
-        rows.push(build_row_map_from_vecs(&headers, &values));
     }
 
     if rows.is_empty() {
@@ -1067,6 +1142,285 @@ fn parse_excel_rows(path: &Path) -> Result<Vec<HashMap<String, String>>, AppErro
     }
 
     Ok(rows)
+}
+
+const HEADER_KEYWORDS: &[&str] = &[
+    "序号",
+    "创建时间",
+    "外部工单编号",
+    "区级工单编号",
+    "派单类型",
+    "工单来源",
+    "来电主体",
+    "工单类型",
+    "工单标题",
+    "主要内容",
+    "所在街道",
+    "镇_街道",
+    "镇/街道",
+    "所属问题点位",
+    "来电人姓名",
+    "来电人号码",
+    "市级一级问题分类",
+    "市级二级问题分类",
+    "市级三级问题分类",
+    "市级问题分类",
+    "工单状态",
+    "承办单位",
+    "处理结果",
+    "来访日期",
+    "姓名",
+    "性别",
+    "证件号码",
+    "身份证号",
+    "联系电话",
+    "手机号",
+    "通讯地址",
+    "是否初次来访",
+    "随行人数",
+    "事项类型",
+    "内容摘要",
+    "流转单位",
+    "答复情况",
+    "时间",
+    "来信",
+    "信访人姓名",
+    "事项内容",
+    "诉求",
+    "涉四大检察情况",
+    "事项分类",
+    "内容分类",
+    "涉及原案件名称",
+    "办理情况",
+    "是否集体访",
+    "接警编号",
+    "关联编号",
+    "警情序",
+    "报警人",
+    "报警电话",
+    "接报时间",
+    "承办人",
+    "反映内容",
+    "企业编码",
+    "企业名称",
+    "项目编码",
+    "项目名称",
+    "进场时间",
+    "退出时间",
+    "总包联系人",
+    "总包联系方式",
+    "总包名称",
+    "区县",
+    "详情",
+];
+
+fn detect_header_row(rows: &[Vec<String>]) -> Option<usize> {
+    let mut best: Option<(usize, i32)> = None;
+
+    for (index, row) in rows.iter().take(20).enumerate() {
+        let non_empty = row.iter().filter(|value| !value.trim().is_empty()).count() as i32;
+        if non_empty < 2 {
+            continue;
+        }
+
+        let keyword_score = row
+            .iter()
+            .map(|value| header_keyword_score(value))
+            .sum::<i32>();
+        let short_label_score = row
+            .iter()
+            .filter(|value| {
+                let value = value.trim();
+                !value.is_empty() && value.chars().count() <= 32 && !looks_like_data_value(value)
+            })
+            .count() as i32;
+        let score = keyword_score * 5 + short_label_score + non_empty.min(20) - (index as i32 / 3);
+
+        if best
+            .map(|(_, best_score)| score > best_score)
+            .unwrap_or(true)
+        {
+            best = Some((index, score));
+        }
+    }
+
+    best.and_then(|(index, score)| (score >= 8).then_some(index))
+}
+
+fn header_keyword_score(value: &str) -> i32 {
+    let normalized = normalize_lookup_key(value);
+    if normalized.is_empty() {
+        return 0;
+    }
+
+    let exact_match = HEADER_KEYWORDS
+        .iter()
+        .any(|candidate| normalize_lookup_key(candidate) == normalized);
+    if exact_match {
+        return 3;
+    }
+
+    if HEADER_KEYWORDS.iter().any(|candidate| {
+        let candidate = normalize_lookup_key(candidate);
+        normalized.contains(&candidate) || candidate.contains(&normalized)
+    }) {
+        return 1;
+    }
+
+    0
+}
+
+fn looks_like_data_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.parse::<f64>().is_ok()
+        || trimmed.chars().count() > 80
+        || trimmed.contains("市民反映")
+        || trimmed.contains("工单来源：")
+        || trimmed.contains("热线-")
+        || trimmed.contains("网络-")
+        || trimmed.contains("通州-")
+}
+
+fn normalize_excel_headers(rows: &[Vec<String>], header_index: usize) -> Vec<String> {
+    let current = rows.get(header_index).map(Vec::as_slice).unwrap_or(&[]);
+    if header_index == 0 {
+        return normalize_headers(current);
+    }
+
+    let parent = rows.get(header_index - 1).map(Vec::as_slice).unwrap_or(&[]);
+    let width = current.len().max(parent.len());
+    let mut merged = Vec::with_capacity(width);
+    for index in 0..width {
+        let lower = current.get(index).map(String::as_str).unwrap_or("").trim();
+        let upper = parent.get(index).map(String::as_str).unwrap_or("").trim();
+        let header = if lower.is_empty() { upper } else { lower };
+        merged.push(header.to_string());
+    }
+
+    normalize_headers(&merged)
+}
+
+fn normalize_headers(headers: &[String]) -> Vec<String> {
+    let mut seen = HashMap::<String, usize>::new();
+    headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| {
+            let base = header.trim();
+            let base = if base.is_empty() {
+                format!("column_{}", index + 1)
+            } else {
+                base.to_string()
+            };
+            let counter = seen.entry(base.clone()).or_insert(0);
+            *counter += 1;
+            if *counter == 1 {
+                base
+            } else {
+                format!("{base}#{}", *counter)
+            }
+        })
+        .collect()
+}
+
+fn enrich_excel_row_metadata(
+    row: &mut HashMap<String, String>,
+    sheet_name: &str,
+    sheet_index: usize,
+    excel_row_number: usize,
+) {
+    let source_channel = source_channel_from_sheet_name(sheet_name);
+    row.insert("__sheet_name".to_string(), sheet_name.to_string());
+    row.insert("__sheet_index".to_string(), sheet_index.to_string());
+    row.insert(
+        "__excel_row_number".to_string(),
+        excel_row_number.to_string(),
+    );
+    row.insert("__source_channel".to_string(), source_channel.to_string());
+    row.insert(
+        "__source_label".to_string(),
+        source_label_from_channel(source_channel).to_string(),
+    );
+    row.entry("source_type".to_string())
+        .or_insert_with(|| source_channel.to_string());
+}
+
+fn build_image_sheet_placeholder(
+    sheet_name: &str,
+    sheet_index: usize,
+) -> Option<HashMap<String, String>> {
+    let source_channel = source_channel_from_sheet_name(sheet_name);
+    if !matches!(source_channel, "police_110" | "platform_395") {
+        return None;
+    }
+
+    let mut row = HashMap::new();
+    let (title, summary, tags, fields, assignee, area_hint) = match source_channel {
+        "police_110" => (
+            "110接出警信息截图待OCR",
+            "该分页为嵌入图片，已按截图表头识别为 110 接处警信息。截图字段包括序号、接警编号、关联编号、警情序号、报案人姓名、报警方式、报警电话、接报时间、接报单位、承办人、处理结果、处理时间、反馈内容；待后续 OCR 服务接入后拆分为逐条警情记录。",
+            "image_sheet,ocr_pending,police_110,public_security,feedback_content",
+            "序号,接警编号,关联编号,警情序号,报案人姓名,报警方式,报警电话,接报时间,接报单位,承办人,处理结果,处理时间,反馈内容",
+            "110接处警平台",
+            "截图包含多属地警情，待OCR识别",
+        ),
+        "platform_395" => (
+            "395平台劳资/项目数据截图待OCR",
+            "该分页为嵌入图片，已按截图表头识别为 395 平台项目人员与劳资风险数据。截图字段包括序号、姓名、身份证号、手机号、企业编码、企业名称、项目编码、项目名称、进场时间、退出时间、总包编码、总包联系人、总包联系方式、总包名称、区县、是否被高、详情；待后续 OCR 服务接入后拆分为项目、企业、人员和欠薪线索记录。",
+            "image_sheet,ocr_pending,platform_395,construction_wage,project_personnel",
+            "序号,姓名,身份证号,手机号,企业编码,企业名称,项目编码,项目名称,进场时间,退出时间,总包编码,总包联系人,总包联系方式,总包名称,区县,是否被高,详情",
+            "395平台",
+            "截图包含项目区县，待OCR识别",
+        ),
+        _ => unreachable!(),
+    };
+
+    row.insert("工单标题".to_string(), title.to_string());
+    row.insert("主要内容".to_string(), summary.to_string());
+    row.insert("反映内容".to_string(), summary.to_string());
+    row.insert("详情".to_string(), summary.to_string());
+    row.insert("所在街道".to_string(), area_hint.to_string());
+    row.insert("区县".to_string(), area_hint.to_string());
+    row.insert("承办单位".to_string(), assignee.to_string());
+    row.insert("工单状态".to_string(), "待OCR".to_string());
+    row.insert("risk_tags".to_string(), tags.to_string());
+    row.insert("ocr_status".to_string(), "pending".to_string());
+    row.insert("ocr_required".to_string(), "true".to_string());
+    row.insert("ocr_required_fields".to_string(), fields.to_string());
+    row.insert(
+        "source_record_type".to_string(),
+        "image_sheet_ocr_pending".to_string(),
+    );
+    row.insert("__image_sheet".to_string(), "true".to_string());
+    enrich_excel_row_metadata(&mut row, sheet_name, sheet_index, 0);
+    Some(row)
+}
+
+fn source_channel_from_sheet_name(sheet_name: &str) -> &'static str {
+    if sheet_name.contains("110") {
+        "police_110"
+    } else if sheet_name.contains("395") {
+        "platform_395"
+    } else if sheet_name.contains("12345") || sheet_name.contains("12315") {
+        "hotline_12345"
+    } else if sheet_name.contains("检察院") && sheet_name.contains("信访") {
+        "procuratorate_petition"
+    } else if sheet_name.contains("综治") || sheet_name.contains("信访") {
+        "petitions"
+    } else {
+        "manual_excel"
+    }
+}
+
+fn source_label_from_channel(source_channel: &str) -> &'static str {
+    match source_channel {
+        "hotline_12345" => "12345/12315 热线工单",
+        "police_110" => "110 接处警信息",
+        "platform_395" => "395 平台数据",
+        "procuratorate_petition" => "检察院信访数据",
+        "petitions" => "综治/信访数据",
+        _ => "人工导入表格",
+    }
 }
 
 fn build_row_map(headers: &StringRecord, record: &StringRecord) -> HashMap<String, String> {
@@ -1087,7 +1441,10 @@ fn build_row_map_from_vecs(headers: &[String], values: &[String]) -> HashMap<Str
 
 fn build_fallback_rows(file_name: &str) -> Vec<HashMap<String, String>> {
     let mut row = HashMap::new();
-    row.insert("title".to_string(), format!("{} generated placeholder lead", file_name));
+    row.insert(
+        "title".to_string(),
+        format!("{} generated placeholder lead", file_name),
+    );
     row.insert("area_name".to_string(), "pending-area".to_string());
     vec![row]
 }
@@ -1104,7 +1461,8 @@ fn build_import_record_context(
         };
 
         match field.target_field.as_str() {
-            "case_title" | "title" => context.title = Some(value),
+            "case_title" | "title" => context.title = Some(truncate_title(&value)),
+            "source_type" => context.source_type = Some(value),
             "area_name" | "street" => context.area_name = Some(value),
             "occurred_at" => {
                 if let Some(parsed) = parse_datetime_value(&value) {
@@ -1133,31 +1491,113 @@ fn build_import_record_context(
         }
     }
 
+    if context.source_type.is_none() {
+        context.source_type = derive_source_type(record);
+    }
     if context.title.is_none() {
-        context.title = extract_value(record, &["title", "case_title", "subject", "summary"]);
+        context.title = extract_value(
+            record,
+            &[
+                "title",
+                "case_title",
+                "subject",
+                "summary",
+                "工单标题",
+                "主要内容",
+                "事项内容",
+                "内容摘要",
+                "反映内容",
+                "详情",
+                "诉求",
+                "项目名称",
+            ],
+        )
+        .map(|value| truncate_title(&value));
     }
     if context.area_name.is_none() {
-        context.area_name = extract_value(record, &["area_name", "street", "district", "area"]);
+        context.area_name = extract_value(
+            record,
+            &[
+                "area_name",
+                "street",
+                "district",
+                "area",
+                "所在街道",
+                "镇_街道",
+                "镇/街道",
+                "街道",
+                "区县",
+                "通讯地址",
+                "所属问题点位",
+                "详细地址",
+                "项目名称",
+            ],
+        );
     }
     if context.occurred_at.is_none() {
-        context.occurred_at = extract_value(record, &["occurred_at", "date", "time"])
-            .and_then(|value| parse_datetime_value(&value));
+        context.occurred_at = extract_value(
+            record,
+            &[
+                "occurred_at",
+                "date",
+                "time",
+                "创建时间",
+                "来访日期",
+                "时间",
+                "接报时",
+                "接报时间",
+                "市级派单时间",
+                "区级派单时间",
+                "办结时间",
+                "进场时间",
+                "退出时间",
+            ],
+        )
+        .and_then(|value| parse_datetime_value(&value));
     }
     if context.risk_score.is_none() {
         context.risk_score = extract_value(record, &["risk_score", "score", "rating"])
-            .and_then(|value| parse_score_value(&value));
+            .and_then(|value| parse_score_value(&value))
+            .or_else(|| derive_risk_score_from_record(record));
     }
     if context.risk_level.is_none() {
-        context.risk_level = extract_value(record, &["risk_level", "level"]);
+        context.risk_level =
+            extract_value(record, &["risk_level", "level", "风险等级", "预警等级"]);
     }
     if context.status.is_none() {
-        context.status = extract_value(record, &["status", "case_status"]);
+        context.status = extract_value(
+            record,
+            &[
+                "status",
+                "case_status",
+                "工单状态",
+                "办理情况",
+                "处理结果",
+                "答复情况",
+                "ocr_status",
+            ],
+        );
     }
     if context.alert_status.is_none() {
-        context.alert_status = extract_value(record, &["alert_status", "warning_status"]);
+        context.alert_status =
+            extract_value(record, &["alert_status", "warning_status", "预警状态"]);
     }
     if context.assignee.is_none() {
-        context.assignee = extract_value(record, &["assignee", "owner", "handler"]);
+        context.assignee = extract_value(
+            record,
+            &[
+                "assignee",
+                "owner",
+                "handler",
+                "承办单位",
+                "流转单位",
+                "原案涉及部门及检察官",
+                "线索分流去向",
+                "处置人姓名",
+                "总包名称",
+                "承办人",
+            ],
+        );
     }
     if context.report_period.is_none() {
         context.report_period = extract_value(record, &["report_period", "period"]);
@@ -1165,7 +1605,8 @@ fn build_import_record_context(
     if context.risk_tags.is_empty() {
         context.risk_tags = extract_value(record, &["risk_tags", "tags"])
             .map(|value| {
-                value.split(|ch| ch == ',' || ch == ';' || ch == '|')
+                value
+                    .split(|ch| ch == ',' || ch == ';' || ch == '|')
                     .map(str::trim)
                     .filter(|segment| !segment.is_empty())
                     .map(str::to_string)
@@ -1173,24 +1614,269 @@ fn build_import_record_context(
             })
             .unwrap_or_default();
     }
+    context.risk_tags.extend(collect_risk_tags(record));
+    context.risk_tags = dedupe_strings(context.risk_tags);
 
     context
 }
 
 fn extract_value(record: &HashMap<String, String>, candidates: &[&str]) -> Option<String> {
-    candidates.iter().find_map(|key| {
-        record
+    for key in candidates {
+        if let Some(value) = record
             .get(*key)
             .map(String::as_str)
             .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+
+    let normalized_candidates = candidates
+        .iter()
+        .map(|candidate| normalize_lookup_key(candidate))
+        .collect::<Vec<_>>();
+
+    record.iter().find_map(|(key, value)| {
+        let normalized_key = normalize_lookup_key(key);
+        normalized_candidates
+            .iter()
+            .any(|candidate| candidate == &normalized_key)
+            .then(|| value.trim())
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     })
 }
 
+fn normalize_lookup_key(value: &str) -> String {
+    let without_duplicate_suffix = value.split('#').next().unwrap_or(value);
+    without_duplicate_suffix
+        .chars()
+        .filter(|ch| {
+            !ch.is_whitespace()
+                && !matches!(
+                    ch,
+                    '_' | '-'
+                        | '/'
+                        | '\\'
+                        | ':'
+                        | '：'
+                        | '('
+                        | ')'
+                        | '（'
+                        | '）'
+                        | '['
+                        | ']'
+                        | '【'
+                        | '】'
+                )
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn derive_source_type(record: &HashMap<String, String>) -> Option<String> {
+    for candidate in [
+        "__source_channel",
+        "source_type",
+        "工单来源",
+        "__sheet_name",
+    ] {
+        let Some(value) = extract_value(record, &[candidate]) else {
+            continue;
+        };
+        let normalized = value.to_ascii_lowercase();
+        if normalized.contains("110") {
+            return Some("police_110".to_string());
+        }
+        if normalized.contains("395") {
+            return Some("platform_395".to_string());
+        }
+        if normalized.contains("12345") || normalized.contains("12315") || value.contains("热线")
+        {
+            return Some("hotline_12345".to_string());
+        }
+        if value.contains("检察院") && value.contains("信访") {
+            return Some("procuratorate_petition".to_string());
+        }
+        if value.contains("综治") || value.contains("信访") {
+            return Some("petitions".to_string());
+        }
+        if matches!(
+            normalized.as_str(),
+            "manual_excel"
+                | "manual_upload"
+                | "petitions"
+                | "procuratorate_petition"
+                | "hotline_12345"
+                | "police_110"
+                | "platform_395"
+        ) {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+fn collect_risk_tags(record: &HashMap<String, String>) -> Vec<String> {
+    let mut tags = Vec::new();
+    for key in [
+        "risk_tags",
+        "tags",
+        "__source_channel",
+        "__sheet_name",
+        "工单来源",
+        "工单类型",
+        "市级一级问题分类",
+        "市级二级问题分类",
+        "市级三级问题分类",
+        "市级问题分类",
+        "市级工单标签",
+        "区级工单标签",
+        "事项类型",
+        "事项分类",
+        "内容分类",
+        "涉四大检察情况",
+        "是否涉及非吸投资",
+        "是否集体访",
+    ] {
+        if let Some(value) = extract_value(record, &[key]) {
+            tags.extend(split_tag_value(&value));
+        }
+    }
+
+    let text = record.values().cloned().collect::<Vec<_>>().join(" ");
+    for (keyword, tag) in [
+        ("欠薪", "劳资欠薪"),
+        ("工资", "劳资欠薪"),
+        ("恶意讨薪", "劳资纠纷"),
+        ("集体访", "集体访"),
+        ("群体", "群体性风险"),
+        ("非吸", "非法吸收公众存款"),
+        ("诈骗", "诈骗风险"),
+        ("食品安全", "食品安全"),
+        ("住房安全", "住房安全"),
+        ("隔断", "违规群租"),
+        ("犬", "犬类管理"),
+        ("宠物", "犬类管理"),
+        ("酒店", "文旅住宿安全"),
+        ("报警", "警情关联"),
+        ("110", "警情关联"),
+        ("施工", "施工项目"),
+        ("总包", "工程建设"),
+        ("信访", "信访事项"),
+        ("投诉", "投诉举报"),
+    ] {
+        if text.contains(keyword) {
+            tags.push(tag.to_string());
+        }
+    }
+
+    dedupe_strings(tags)
+}
+
+fn split_tag_value(value: &str) -> Vec<String> {
+    value
+        .replace("->", ",")
+        .split(|ch| matches!(ch, ',' | '，' | ';' | '；' | '|' | '/' | '、'))
+        .map(str::trim)
+        .filter(|segment| {
+            !segment.is_empty()
+                && !matches!(*segment, "是" | "否" | "保密" | "不详" | "其他")
+                && segment.chars().count() <= 64
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn derive_risk_score_from_record(record: &HashMap<String, String>) -> Option<f64> {
+    let text = record.values().cloned().collect::<Vec<_>>().join(" ");
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let mut score = 58.0_f64;
+    for keyword in [
+        "欠薪",
+        "恶意讨薪",
+        "集体访",
+        "群体",
+        "非吸",
+        "诈骗",
+        "暴力",
+        "极端",
+        "报警",
+        "110",
+    ] {
+        if text.contains(keyword) {
+            score += 10.0;
+        }
+    }
+    for keyword in [
+        "纠纷",
+        "投诉",
+        "信访",
+        "食品安全",
+        "住房安全",
+        "酒店",
+        "施工",
+        "工资",
+        "隔断",
+        "安全监管",
+    ] {
+        if text.contains(keyword) {
+            score += 6.0;
+        }
+    }
+    if extract_value(record, &["是否集体访"]).as_deref() == Some("是") {
+        score += 15.0;
+    }
+    if extract_value(record, &["是否超区截止时间", "是否超市截止时间"]).as_deref() == Some("是")
+    {
+        score += 4.0;
+    }
+
+    Some(score.clamp(45.0, 96.0))
+}
+
+fn truncate_title(value: &str) -> String {
+    let trimmed = value.trim();
+    let mut title = trimmed.chars().take(80).collect::<String>();
+    if trimmed.chars().count() > 80 {
+        title.push('…');
+    }
+    title
+}
+
+fn dedupe_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let key = normalize_lookup_key(value);
+        if seen.insert(key) {
+            deduped.push(value.to_string());
+        }
+    }
+    deduped
+}
+
 fn parse_datetime_value(value: &str) -> Option<DateTime<Utc>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
     if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
         return Some(parsed.with_timezone(&Utc));
+    }
+
+    if let Some(parsed) = parse_excel_serial_datetime(value) {
+        return Some(parsed);
     }
 
     for format in [
@@ -1198,8 +1884,11 @@ fn parse_datetime_value(value: &str) -> Option<DateTime<Utc>> {
         "%Y-%m-%d %H:%M",
         "%Y/%m/%d %H:%M:%S",
         "%Y/%m/%d %H:%M",
+        "%Y年%m月%d日 %H:%M:%S",
+        "%Y年%m月%d日 %H:%M",
         "%Y-%m-%d",
         "%Y/%m/%d",
+        "%Y年%m月%d日",
     ] {
         if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(value, format) {
             return Some(DateTime::<Utc>::from_naive_utc_and_offset(parsed, Utc));
@@ -1212,6 +1901,21 @@ fn parse_datetime_value(value: &str) -> Option<DateTime<Utc>> {
     }
 
     None
+}
+
+fn parse_excel_serial_datetime(value: &str) -> Option<DateTime<Utc>> {
+    let serial = value.trim().parse::<f64>().ok()?;
+    if !(20_000.0..=80_000.0).contains(&serial) {
+        return None;
+    }
+
+    let epoch = chrono::NaiveDate::from_ymd_opt(1899, 12, 30)?.and_hms_opt(0, 0, 0)?;
+    let whole_days = serial.trunc() as i64;
+    let seconds = ((serial.fract() * 86_400.0).round()) as i64;
+    epoch
+        .checked_add_signed(Duration::days(whole_days))?
+        .checked_add_signed(Duration::seconds(seconds))
+        .map(|datetime| DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc))
 }
 
 fn parse_score_value(value: &str) -> Option<f64> {
@@ -1231,7 +1935,10 @@ fn cell_to_string(cell: &Data) -> String {
         }
         Data::Int(value) => value.to_string(),
         Data::Bool(value) => value.to_string(),
-        Data::DateTime(value) => value.to_string(),
+        Data::DateTime(value) => {
+            let (year, month, day, hour, minute, second, _) = value.to_ymd_hms_milli();
+            format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+        }
         Data::DateTimeIso(value) => value.trim().to_string(),
         Data::DurationIso(value) => value.trim().to_string(),
         Data::Error(_) => String::new(),
@@ -1250,9 +1957,15 @@ fn default_risk_score(row_index: i32, source_type: &str) -> f64 {
 }
 
 fn normalize_risk_level(value: &str) -> &'static str {
-    match value.trim().to_ascii_lowercase().as_str() {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
         "high" | "critical" => "high",
         "medium" | "mid" => "medium",
+        "low" => "low",
+        _ if value.contains("高") || value.contains("重大") || value.contains("严重") => {
+            "high"
+        }
+        _ if value.contains("中") || value.contains("一般") => "medium",
         _ => "low",
     }
 }
@@ -1268,22 +1981,45 @@ fn risk_level_from_score(score: f64) -> &'static str {
 }
 
 fn normalize_case_status(value: &str) -> Result<&'static str, AppError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "todo" | "pending_review" | "in_progress" | "disposed" | "closed" => {
-            Ok(Box::leak(value.trim().to_ascii_lowercase().into_boxed_str()))
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "todo" => Ok("todo"),
+        "pending_review" | "open" | "pending" | "ocr_pending" => Ok("pending_review"),
+        "in_progress" | "processing" | "running" => Ok("in_progress"),
+        "disposed" | "resolved" => Ok("disposed"),
+        "closed" => Ok("closed"),
+        _ if value.contains("待") || value.contains("未") => Ok("pending_review"),
+        _ if value.contains("办理中") || value.contains("处理中") || value.contains("处置中") => {
+            Ok("in_progress")
         }
-        "open" => Ok("pending_review"),
-        other => Err(AppError::Validation(format!("unsupported case status: {other}"))),
+        _ if value.contains("已处置") || value.contains("已解决") || value.contains("已化解") => {
+            Ok("disposed")
+        }
+        _ if value.contains("已结案")
+            || value.contains("已办结")
+            || value.contains("办结")
+            || value.contains("直接答复") =>
+        {
+            Ok("closed")
+        }
+        _ => Ok("pending_review"),
     }
 }
 
 fn normalize_alert_status(value: &str) -> Result<&'static str, AppError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "open" | "acknowledged" | "ignored" | "closed" => {
-            Ok(Box::leak(value.trim().to_ascii_lowercase().into_boxed_str()))
-        }
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "open" | "pending" | "pending_review" => Ok("open"),
+        "acknowledged" | "confirmed" => Ok("acknowledged"),
+        "ignored" => Ok("ignored"),
+        "closed" => Ok("closed"),
         "resolved" => Ok("closed"),
-        other => Err(AppError::Validation(format!("unsupported alert status: {other}"))),
+        _ if value.contains("忽略") => Ok("ignored"),
+        _ if value.contains("确认") || value.contains("已读") => Ok("acknowledged"),
+        _ if value.contains("关闭") || value.contains("已结") || value.contains("办结") => {
+            Ok("closed")
+        }
+        _ => Ok("open"),
     }
 }
 
@@ -1310,13 +2046,24 @@ fn default_risk_tags(source_type: &str, risk_level: &str) -> String {
     tags.join(",")
 }
 
+fn compose_risk_tags(source_type: &str, risk_level: &str, tags: &[String]) -> String {
+    let mut composed = tags.to_vec();
+    composed.push(source_type.to_string());
+    composed.push(format!("level:{risk_level}"));
+    if risk_level == "high" {
+        composed.push("escalation".to_string());
+    }
+    let composed = dedupe_strings(composed);
+    if composed.is_empty() {
+        default_risk_tags(source_type, risk_level)
+    } else {
+        composed.join(",")
+    }
+}
+
 fn current_period() -> String {
     let now = Utc::now();
     format!("{}-{:02}", now.year(), now.month())
-}
-
-fn case_ids_is_selected(cases: &[RiskCaseSeedRow]) -> bool {
-    cases.len() < 50
 }
 
 fn format_reference_cases(hits: &[SimilarCaseHit]) -> Vec<String> {
@@ -1338,7 +2085,11 @@ async fn sync_case_vector(
     let embedding = match embedding_service
         .embed_text(&format!(
             "{}\n{}\n{}\n{}\n{}",
-            document.title, document.summary, document.area_name, document.risk_level, document.source_type
+            document.title,
+            document.summary,
+            document.area_name,
+            document.risk_level,
+            document.source_type
         ))
         .await
     {
@@ -1347,7 +2098,7 @@ async fn sync_case_vector(
             return crate::services::vector::VectorSyncResult {
                 status: "failed".to_string(),
                 message: format!("embedding generation failed: {error}"),
-            }
+            };
         }
     };
 
@@ -1471,4 +2222,155 @@ fn truncate_message(message: &str) -> String {
 
 fn parse_uuid(value: &str) -> Uuid {
     Uuid::parse_str(value).unwrap_or_else(|_| Uuid::nil())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_second_level_header_in_petition_sheet() {
+        let rows = vec![
+            vec![
+                "序号".to_string(),
+                "来访日期".to_string(),
+                "来访人员信息".to_string(),
+                "事件信息".to_string(),
+            ],
+            vec![
+                "姓名".to_string(),
+                "性别".to_string(),
+                "证件号码".to_string(),
+                "联系电话".to_string(),
+                "通讯地址".to_string(),
+                "是否 初次来访".to_string(),
+                "随行人数".to_string(),
+                "事项类型".to_string(),
+                "内容摘要".to_string(),
+                "流转单位".to_string(),
+                "答复情况".to_string(),
+            ],
+            vec![
+                "张三".to_string(),
+                "男".to_string(),
+                "110101199001010000".to_string(),
+                "13800000000".to_string(),
+                "通州区".to_string(),
+                "是".to_string(),
+                "0".to_string(),
+                "求助".to_string(),
+                "反映欠薪问题".to_string(),
+                "综治中心".to_string(),
+                "办理中".to_string(),
+            ],
+        ];
+
+        assert_eq!(detect_header_row(&rows), Some(1));
+    }
+
+    #[test]
+    fn second_level_header_keeps_parent_date_columns() {
+        let rows = vec![
+            vec![
+                "序号".to_string(),
+                "来访日期".to_string(),
+                "来访人员信息".to_string(),
+                "事件信息".to_string(),
+            ],
+            vec![
+                "".to_string(),
+                "".to_string(),
+                "姓名".to_string(),
+                "内容摘要".to_string(),
+            ],
+        ];
+
+        let headers = normalize_excel_headers(&rows, 1);
+
+        assert_eq!(headers[0], "序号");
+        assert_eq!(headers[1], "来访日期");
+        assert_eq!(headers[2], "姓名");
+        assert_eq!(headers[3], "内容摘要");
+    }
+
+    #[test]
+    fn context_extracts_chinese_hotline_fields() {
+        let mut record = HashMap::new();
+        record.insert("__sheet_name".to_string(), "12345示例数据".to_string());
+        record.insert("__source_channel".to_string(), "hotline_12345".to_string());
+        record.insert("工单标题".to_string(), "门店食品安全投诉".to_string());
+        record.insert(
+            "主要内容".to_string(),
+            "市民反映蛋糕内有虫子，要求监管部门处理。".to_string(),
+        );
+        record.insert("所在街道".to_string(), "九棵树街道".to_string());
+        record.insert("创建时间".to_string(), "46054.0045486111".to_string());
+        record.insert("市级一级问题分类".to_string(), "公共安全".to_string());
+        record.insert("市级二级问题分类".to_string(), "食品安全".to_string());
+        record.insert("工单状态".to_string(), "已结案".to_string());
+        record.insert("承办单位".to_string(), "区市场监管局".to_string());
+
+        let context = build_import_record_context(&record, &[]);
+
+        assert_eq!(context.source_type.as_deref(), Some("hotline_12345"));
+        assert_eq!(context.title.as_deref(), Some("门店食品安全投诉"));
+        assert_eq!(context.area_name.as_deref(), Some("九棵树街道"));
+        assert_eq!(context.assignee.as_deref(), Some("区市场监管局"));
+        assert_eq!(
+            context.occurred_at.unwrap().date_naive().to_string(),
+            "2026-02-01"
+        );
+        assert!(context.risk_tags.iter().any(|tag| tag == "食品安全"));
+        assert_eq!(
+            normalize_case_status(context.status.as_deref().unwrap()).unwrap(),
+            "closed"
+        );
+    }
+
+    #[test]
+    fn image_sheet_placeholder_keeps_stable_ocr_contract() {
+        let row = build_image_sheet_placeholder("110接出警信息", 4).unwrap();
+
+        assert_eq!(
+            row.get("__source_channel").map(String::as_str),
+            Some("police_110")
+        );
+        assert_eq!(row.get("__image_sheet").map(String::as_str), Some("true"));
+        assert_eq!(row.get("ocr_status").map(String::as_str), Some("pending"));
+        assert!(row
+            .get("主要内容")
+            .map(|value| value.contains("接警编号"))
+            .unwrap_or(false));
+        assert_eq!(row.get("ocr_required").map(String::as_str), Some("true"));
+        assert!(row
+            .get("ocr_required_fields")
+            .map(|value| value.contains("反馈内容"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn platform_395_image_placeholder_exposes_project_personnel_contract() {
+        let row = build_image_sheet_placeholder("395平台数据", 5).unwrap();
+
+        assert_eq!(
+            row.get("__source_channel").map(String::as_str),
+            Some("platform_395")
+        );
+        assert!(row
+            .get("ocr_required_fields")
+            .map(|value| value.contains("总包联系方式") && value.contains("项目名称"))
+            .unwrap_or(false));
+        assert!(row
+            .get("risk_tags")
+            .map(|value| value.contains("construction_wage"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn chinese_statuses_are_import_safe() {
+        assert_eq!(normalize_case_status("已结案").unwrap(), "closed");
+        assert_eq!(normalize_case_status("办理中").unwrap(), "in_progress");
+        assert_eq!(normalize_case_status("待OCR").unwrap(), "pending_review");
+        assert_eq!(normalize_alert_status("已确认").unwrap(), "acknowledged");
+    }
 }

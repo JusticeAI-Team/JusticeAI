@@ -8,10 +8,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use sqlx::PgPool;
 use tower_http::{
-    compression::CompressionLayer,
-    cors::CorsLayer,
-    timeout::TimeoutLayer,
-    trace::TraceLayer,
+    compression::CompressionLayer, cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer,
 };
 
 use crate::api;
@@ -160,7 +157,7 @@ pub fn build_app(state: AppState) -> Router {
         .with_state(state)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(300),
         ))
         .layer(CompressionLayer::new())
         .layer(cors)

@@ -188,20 +188,14 @@ fn cleanup_uploaded_file(target: &StorageTarget) {
 
 fn map_multipart_error(error: MultipartError) -> AppError {
     match error.status() {
-        StatusCode::PAYLOAD_TOO_LARGE => {
-            AppError::Validation("上传文件不能超过 10 MB".to_string())
-        }
+        StatusCode::PAYLOAD_TOO_LARGE => AppError::Validation("上传文件不能超过 10 MB".to_string()),
         StatusCode::BAD_REQUEST => AppError::Validation("读取上传表单失败".to_string()),
         _ => AppError::Internal,
     }
 }
 
 async fn read_upload_field(mut multipart: Multipart) -> Result<UploadFilePayload, AppError> {
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(map_multipart_error)?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(map_multipart_error)? {
         if field.name() != Some("file") {
             continue;
         }
@@ -215,15 +209,13 @@ async fn read_upload_field(mut multipart: Multipart) -> Result<UploadFilePayload
             .ok_or_else(|| AppError::Validation("仅支持 xlsx、xls、csv 文件".to_string()))?;
 
         if !allowed_extension(&extension) {
-            return Err(AppError::Validation("仅支持 xlsx、xls、csv 文件".to_string()));
+            return Err(AppError::Validation(
+                "仅支持 xlsx、xls、csv 文件".to_string(),
+            ));
         }
 
         let mime_type = field.content_type().map(str::to_string);
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(map_multipart_error)?
-            .to_vec();
+        let bytes = field.bytes().await.map_err(map_multipart_error)?.to_vec();
 
         if bytes.is_empty() {
             return Err(AppError::Validation("上传文件不能为空".to_string()));
@@ -340,14 +332,18 @@ mod tests {
     fn sanitize_original_filename_rejects_illegal_characters() {
         let error = sanitize_original_filename("案件/台账.xlsx").unwrap_err();
 
-        assert!(matches!(error, AppError::Validation(message) if message == "上传文件名包含非法字符"));
+        assert!(
+            matches!(error, AppError::Validation(message) if message == "上传文件名包含非法字符")
+        );
     }
 
     #[test]
     fn sanitize_original_filename_rejects_backslash() {
         let error = sanitize_original_filename("案件\\台账.xlsx").unwrap_err();
 
-        assert!(matches!(error, AppError::Validation(message) if message == "上传文件名包含非法字符"));
+        assert!(
+            matches!(error, AppError::Validation(message) if message == "上传文件名包含非法字符")
+        );
     }
 
     #[test]
@@ -361,12 +357,18 @@ mod tests {
 
     #[test]
     fn build_storage_target_uses_given_date_parts() {
-        let now = Utc.with_ymd_and_hms(2026, 4, 17, 8, 30, 0).single().unwrap();
+        let now = Utc
+            .with_ymd_and_hms(2026, 4, 17, 8, 30, 0)
+            .single()
+            .unwrap();
 
         let target = build_storage_target("uploads", "csv", now);
 
         assert!(target.stored_filename.ends_with(".csv"));
         assert!(target.relative_path.starts_with("2026/04/17/"));
-        assert_eq!(target.absolute_path, PathBuf::from("uploads").join(&target.relative_path));
+        assert_eq!(
+            target.absolute_path,
+            PathBuf::from("uploads").join(&target.relative_path)
+        );
     }
 }
