@@ -8,9 +8,24 @@
       </div>
       <div class="bar-right">
         <span class="status-dot"></span>
-        <span class="status-text">系统全链路状态: 运转中</span>
+        <span class="status-text">系统全链路状态: {{ apiError ? '需人工关注' : '运转中' }}</span>
       </div>
     </header>
+
+    <section class="live-summary">
+      <div class="summary-card" v-for="item in summaryCards" :key="item.key">
+        <div class="summary-label">{{ item.label }}</div>
+        <div class="summary-value">{{ item.value }}</div>
+        <div :class="['summary-status', item.status]">{{ item.note }}</div>
+      </div>
+      <button class="ops-button" @click="loadPipelineStats" :disabled="isRefreshing">
+        {{ isRefreshing ? '刷新中...' : '刷新后端统计' }}
+      </button>
+    </section>
+
+    <div v-if="apiError" class="api-error">
+      后端提示：{{ apiError }}
+    </div>
 
     <main class="pipeline-board">
       
@@ -25,12 +40,17 @@
         </div>
         
         <div class="step-content">
-          <div :class="['upload-dropzone', { 'is-processing': isProcessing }]" @click="triggerFileInput">
+          <div
+            :class="['upload-dropzone', { 'is-processing': isProcessing }]"
+            @click="triggerFileInput"
+            @dragover.prevent
+            @drop.prevent="handleFileDrop"
+          >
             <div class="scan-beam" v-if="isProcessing"></div>
             <i class="el-icon-upload cloud-icon"></i>
-            <p class="u-main">{{ isProcessing ? '数据流注入中...' : '拖拽 12345/110 数据包至此' }}</p>
-            <p class="u-sub">.xlsx / .csv / .json</p>
-            <input type="file" ref="fileInput" class="hidden-input" @change="handleFileSelect" />
+            <p class="u-main">{{ isProcessing ? '后端处理链路执行中...' : '拖拽通州多分页 Excel / CSV 至此' }}</p>
+            <p class="u-sub">支持 .xlsx / .xls / .csv；截图页将以 OCR 待处理合同入库</p>
+            <input type="file" ref="fileInput" class="hidden-input" accept=".xlsx,.xls,.csv" @change="handleFileSelect" />
           </div>
 
           <div class="file-queue">
@@ -41,6 +61,24 @@
                 <div class="f-name">{{ f.name }}</div>
                 <div class="f-status" :style="{ color: f.color }">{{ f.status }}</div>
               </div>
+            </div>
+            <div v-if="latestCases.length" class="case-action-panel">
+              <div class="queue-title">最新批次案件</div>
+              <div class="case-action-head">
+                <div>
+                  <strong>{{ latestCases.length }} 条标准案件</strong>
+                  <p>批次 {{ latestImportShort }} 已入库，可继续触发真实抽取、HugeGraph 同步和 Milvus 向量回写。</p>
+                </div>
+                <button class="mini-primary" @click="runExtractionForLatestCases" :disabled="isExtracting">
+                  {{ isExtracting ? '抽取同步中...' : '执行抽取同步' }}
+                </button>
+              </div>
+              <div class="case-mini-row" v-for="item in latestCases.slice(0, 4)" :key="item.id">
+                <span>{{ item.case_code }}</span>
+                <b>{{ item.title }}</b>
+                <em>{{ item.graph_sync_status }} / {{ item.vector_sync_status }}</em>
+              </div>
+              <div class="extract-status">{{ extractionStatus }}</div>
             </div>
           </div>
         </div>
@@ -56,8 +94,8 @@
         <div class="step-header">
           <div class="step-num">02</div>
           <div class="step-info">
-            <h3 class="step-title">GLM-5.1 智能抽取提炼</h3>
-            <p class="step-sub">大模型将大段“白话文”转为结构化标签</p>
+            <h3 class="step-title">OpenAI-Compatible 智能抽取提炼</h3>
+            <p class="step-sub">vLLM / Embedding / HugeGraph / Milvus 真实链路</p>
           </div>
         </div>
         
@@ -78,7 +116,7 @@
             </div>
             
             <div v-if="isProcessing" class="log-block loading-block">
-              GLM-5.1 正在阅读并提取下一条批次... <span class="blinking-cursor">_</span>
+              后端正在执行：上传落盘 → 多 sheet 解析 → 标准案件生成 → AI 摘要/风险原因 → 图谱/向量同步 <span class="blinking-cursor">_</span>
             </div>
           </div>
         </div>
@@ -120,18 +158,32 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import * as echarts from 'echarts'
+import { apiGet, apiPost, apiUploadImport } from '../api/platform'
 
 const isProcessing = ref(false)
+const isExtracting = ref(false)
+const isRefreshing = ref(false)
+const apiError = ref('')
 const fileInput = ref(null)
 const terminalRef = ref(null)
 const graphRef = ref(null)
+const latestImportId = ref('')
+const latestCases = ref([])
+const extractionStatus = ref('等待案件入库')
 
 let myChart = null
 
 const animatedNodes = ref(142589)
 const animatedEdges = ref(384102)
+
+const summaryCards = ref([
+  { key: 'batch_total', label: '导入批次', value: '--', note: '等待后端', status: 'warn' },
+  { key: 'risk_cases', label: '标准案件', value: '--', note: '等待后端', status: 'warn' },
+  { key: 'entities', label: '抽取实体', value: '--', note: '等待后端', status: 'warn' },
+  { key: 'graph_nodes', label: '图谱节点', value: '--', note: '等待后端', status: 'warn' }
+])
 
 const fileList = ref([
   { name: '2026Q2_110警情记录.csv', status: '后台监听中', color: '#666' },
@@ -174,17 +226,79 @@ const graphLinks = ref([
   { source: '8', target: '3', name: '涉事方' }
 ])
 
-const mockAiProcess = [
-  {
-    raw: "我是马驹桥的农民工，华丰的包工头欠了我们三十几人工资，人跑了！",
-    json: `{<br/>  <span style="color:#122E8A">"企业"</span>: "华丰建设",<br/>  <span style="color:#8B5CF6">"嫌疑人"</span>: "王大拿",<br/>  <span style="color:#D9363E">"新增线索"</span>: "12345新增欠薪"<br/>}`,
-    newNodes: [ { id: '9', name: '12345新增欠薪', category: 2, symbolSize: 26 } ],
-    newLinks: [
-      { source: '9', target: '0', name: '直接投诉' },
-      { source: '9', target: '1', name: '责任人' }
-    ]
+const latestImportShort = computed(() => latestImportId.value ? latestImportId.value.slice(0, 8) : '--')
+
+const getMetric = (summary, keyCandidates, fallback = '--') => {
+  const metrics = summary?.metrics || summary?.totals || []
+  const found = metrics.find((item) => keyCandidates.includes(item.key))
+  return found?.value ?? fallback
+}
+
+const setSummaryFromBackend = (ingestion, extraction, graph, risk) => {
+  summaryCards.value = [
+    {
+      key: 'batch_total',
+      label: '导入批次',
+      value: getMetric(ingestion, ['batch_total', 'import_batches']),
+      note: 'imports',
+      status: 'ok'
+    },
+    {
+      key: 'risk_cases',
+      label: '标准案件',
+      value: getMetric(risk, ['case_total', 'risk_cases', 'total_cases', 'total']),
+      note: 'risk_cases',
+      status: 'ok'
+    },
+    {
+      key: 'entities',
+      label: '抽取实体',
+      value: getMetric(extraction, ['entity_total', 'entities', 'knowledge_entities']),
+      note: 'extraction',
+      status: 'ok'
+    },
+    {
+      key: 'graph_nodes',
+      label: '图谱节点',
+      value: getMetric(graph, ['entity_total', 'node_total', 'nodes']),
+      note: 'HugeGraph ready',
+      status: 'ok'
+    }
+  ]
+}
+
+const loadPipelineStats = async () => {
+  isRefreshing.value = true
+  try {
+    const [ingestion, extraction, graph, risk] = await Promise.all([
+      apiGet('/ingestion/summary'),
+      apiGet('/extraction/summary'),
+      apiGet('/graph/summary'),
+      apiGet('/risk/summary')
+    ])
+    setSummaryFromBackend(ingestion, extraction, graph, risk)
+    apiError.value = ''
+  } catch (error) {
+    apiError.value = error.message
+  } finally {
+    isRefreshing.value = false
   }
-]
+}
+
+const refreshCasesForImport = async (importId) => {
+  if (!importId) return []
+  const result = await apiGet(`/risk/cases?import_id=${encodeURIComponent(importId)}&page_size=50`)
+  latestCases.value = result?.items || []
+  renderGraphFromCases(latestCases.value)
+  return latestCases.value
+}
+
+const escapeHtml = (value) =>
+  String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
 
 const initGraph = () => {
   if (!graphRef.value) return
@@ -254,6 +368,39 @@ const updateGraph = () => {
   myChart.setOption(option)
 }
 
+const renderGraphFromCases = (cases) => {
+  if (!cases.length) return
+  const nextNodes = []
+  const nextLinks = []
+  cases.slice(0, 10).forEach((item, index) => {
+    const caseNodeId = `case-${item.id}`
+    const areaNodeId = `area-${item.area_name || 'unknown'}`
+    const riskNodeId = `risk-${item.risk_level || 'unknown'}`
+    nextNodes.push({
+      id: caseNodeId,
+      name: item.title || item.case_code,
+      category: 2,
+      symbolSize: item.risk_level === 'high' ? 30 : 22
+    })
+    if (!nextNodes.some((node) => node.id === areaNodeId)) {
+      nextNodes.push({ id: areaNodeId, name: item.area_name || '未分配地区', category: 0, symbolSize: 24 })
+    }
+    if (!nextNodes.some((node) => node.id === riskNodeId)) {
+      nextNodes.push({ id: riskNodeId, name: `${item.risk_level || 'unknown'} 风险`, category: 3, symbolSize: 20 })
+    }
+    nextLinks.push({ source: caseNodeId, target: areaNodeId, name: '属地' })
+    nextLinks.push({ source: caseNodeId, target: riskNodeId, name: '风险等级' })
+    if (index > 0) {
+      nextLinks.push({ source: caseNodeId, target: `case-${cases[index - 1].id}`, name: '同批次' })
+    }
+  })
+  graphNodes.value = nextNodes
+  graphLinks.value = nextLinks
+  animatedNodes.value = nextNodes.length
+  animatedEdges.value = nextLinks.length
+  updateGraph()
+}
+
 const triggerFileInput = () => { fileInput.value.click() }
 
 const scrollToBottom = () => {
@@ -262,46 +409,153 @@ const scrollToBottom = () => {
   })
 }
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const isFinalJobStatus = (status) => ['completed', 'completed_with_warnings', 'failed', 'cancelled'].includes(String(status || '').toLowerCase())
+
+const waitForJob = async (jobId, onTick, timeoutMs = 15 * 60 * 1000) => {
+  const startedAt = Date.now()
+  let lastMessage = ''
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const job = await apiGet(`/jobs/${jobId}`)
+    const tickMessage = `${job.status} · ${job.progress_percent}% · ${job.message || 'running'}`
+    if (tickMessage !== lastMessage) {
+      lastMessage = tickMessage
+      onTick?.(job)
+    }
+    if (isFinalJobStatus(job.status)) {
+      return job
+    }
+    await delay(2000)
+  }
+
+  throw new Error(`后台任务 ${jobId} 超过等待时间，请到技术运维后台查看任务状态。`)
+}
+
 const handleFileSelect = (e) => {
   if (e.target.files.length > 0) {
-    const fileName = e.target.files[0].name
-    startPipeline(fileName)
+    startPipeline(e.target.files[0])
+    e.target.value = ''
   }
 }
 
-const startPipeline = (fileName) => {
+const handleFileDrop = (e) => {
+  const file = e.dataTransfer?.files?.[0]
+  if (file) startPipeline(file)
+}
+
+const startPipeline = async (file) => {
   if (isProcessing.value) return
   isProcessing.value = true
-  fileList.value.unshift({ name: fileName, status: 'AI 提炼中...', color: '#F5A623' })
-  
-  let step = 0
-  const timer = setInterval(() => {
-    if (step < mockAiProcess.length) {
-      const currentStep = mockAiProcess[step]
-      
-      logs.value.push(currentStep)
-      scrollToBottom()
-      
-      graphNodes.value.push(...currentStep.newNodes)
-      graphLinks.value.push(...currentStep.newLinks)
-      updateGraph() 
-      
-      animatedNodes.value += 1
-      animatedEdges.value += 3
-      
-      step++
-    } else {
-      clearInterval(timer)
-      isProcessing.value = false
-      fileList.value[0].status = '入库结网完毕'
-      fileList.value[0].color = '#0F7E3B'
+  apiError.value = ''
+  const queueItem = { name: file.name, status: '上传中...', color: '#F5A623' }
+  fileList.value.unshift(queueItem)
+
+  try {
+    const uploaded = await apiUploadImport(file)
+    latestImportId.value = uploaded.import_id
+    latestCases.value = []
+    extractionStatus.value = '等待案件生成'
+    queueItem.status = `已上传 ${uploaded.import_id.slice(0, 8)}，处理中...`
+    queueItem.importId = uploaded.import_id
+
+    logs.value.push({
+      raw: `上传完成：${file.name}，后端批次 ${uploaded.import_id}`,
+      json: `{<br/>  <span style="color:#122E8A">"导入状态"</span>: "uploaded",<br/>  <span style="color:#0F7E3B">"文件"</span>: "${escapeHtml(uploaded.file.original_filename)}"<br/>}`
+    })
+    scrollToBottom()
+
+    const processJob = await apiPost(`/ingestion/${uploaded.import_id}/process/async`)
+    queueItem.status = `处理任务已排队 ${processJob.id.slice(0, 8)}`
+    logs.value.push({
+      raw: `后台任务已创建：${processJob.id}`,
+      json: `{<br/>  <span style="color:#122E8A">"job_type"</span>: "${escapeHtml(processJob.job_type)}",<br/>  <span style="color:#F5A623">"status"</span>: "${escapeHtml(processJob.status)}"<br/>}`
+    })
+    scrollToBottom()
+
+    const completedProcessJob = await waitForJob(processJob.id, (job) => {
+      queueItem.status = `处理进度 ${job.progress_percent}%：${job.message}`
+    })
+    if (completedProcessJob.status === 'failed') {
+      throw new Error(completedProcessJob.error_message || completedProcessJob.message || '导入处理任务失败')
     }
-  }, 2500)
+
+    const processed = completedProcessJob.result || {}
+    queueItem.status = processed.status === 'processed' ? '入库完毕，待抽取同步' : completedProcessJob.status
+    queueItem.color = completedProcessJob.status === 'completed' ? '#0F7E3B' : '#D9363E'
+
+    logs.value.push({
+      raw: `后端处理结果：${completedProcessJob.message}`,
+      json: `{<br/>  <span style="color:#122E8A">"状态"</span>: "${escapeHtml(processed.status || completedProcessJob.status)}",<br/>  <span style="color:#8B5CF6">"批次"</span>: "${escapeHtml(uploaded.import_id)}",<br/>  <span style="color:#0F7E3B">"外部同步"</span>: "案件生成后由抽取链路写回 graph/vector 状态"<br/>}`
+    })
+
+    const cases = await refreshCasesForImport(uploaded.import_id)
+    extractionStatus.value = cases.length
+      ? `已生成 ${cases.length} 条案件；点击“执行抽取同步”进入实体抽取、HugeGraph、Milvus 回写。`
+      : '未查询到本批次案件，请检查处理日志。'
+    logs.value.push({
+      raw: `标准案件查询：本批次返回 ${cases.length} 条风险案件`,
+      json: `{<br/>  <span style="color:#122E8A">"case_count"</span>: ${cases.length},<br/>  <span style="color:#0F7E3B">"next_action"</span>: "extraction_run"<br/>}`
+    })
+    await loadPipelineStats()
+  } catch (error) {
+    queueItem.status = '处理失败'
+    queueItem.color = '#D9363E'
+    apiError.value = error.message
+    logs.value.push({
+      raw: `处理失败：${error.message}`,
+      json: `{<br/>  <span style="color:#D9363E">"error"</span>: "${escapeHtml(error.message)}"<br/>}`
+    })
+  } finally {
+    isProcessing.value = false
+    scrollToBottom()
+  }
+}
+
+const runExtractionForLatestCases = async () => {
+  if (isExtracting.value || !latestCases.value.length) return
+  isExtracting.value = true
+  apiError.value = ''
+  extractionStatus.value = '后端正在执行抽取 → HugeGraph 同步 → Milvus 向量回写；该步骤会真实调用模型和外部服务。'
+  try {
+    const caseIds = latestCases.value.map((item) => item.id)
+    const extractionJob = await apiPost('/extraction/run/async', {
+      case_ids: caseIds,
+      mode: 'incremental'
+    })
+    extractionStatus.value = `抽取任务已排队：${extractionJob.id}`
+    const completedExtractionJob = await waitForJob(extractionJob.id, (job) => {
+      extractionStatus.value = `抽取同步进度 ${job.progress_percent}%：${job.message}`
+    })
+    if (completedExtractionJob.status === 'failed') {
+      throw new Error(completedExtractionJob.error_message || completedExtractionJob.message || '抽取同步任务失败')
+    }
+    const result = completedExtractionJob.result || {}
+    extractionStatus.value = `${completedExtractionJob.status}: ${completedExtractionJob.message}`
+    logs.value.push({
+      raw: `抽取同步完成：${completedExtractionJob.message}`,
+      json: `{<br/>  <span style="color:#122E8A">"job_id"</span>: "${escapeHtml(completedExtractionJob.id)}",<br/>  <span style="color:#8B5CF6">"extraction_run_id"</span>: "${escapeHtml(result.run_id || completedExtractionJob.target_id || '')}",<br/>  <span style="color:#0F7E3B">"status"</span>: "${escapeHtml(completedExtractionJob.status)}"<br/>}`
+    })
+    await refreshCasesForImport(latestImportId.value)
+    await loadPipelineStats()
+  } catch (error) {
+    apiError.value = error.message
+    extractionStatus.value = `抽取同步失败：${error.message}`
+    logs.value.push({
+      raw: `抽取同步失败：${error.message}`,
+      json: `{<br/>  <span style="color:#D9363E">"error"</span>: "${escapeHtml(error.message)}"<br/>}`
+    })
+  } finally {
+    isExtracting.value = false
+    scrollToBottom()
+  }
 }
 
 onMounted(() => {
   initGraph()
   scrollToBottom()
+  loadPipelineStats()
   window.addEventListener('resize', () => myChart && myChart.resize())
 })
 
@@ -324,7 +578,19 @@ onBeforeUnmount(() => {
 .bar-right { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #666; font-weight: bold; }
 .status-dot { width: 8px; height: 8px; background: #52C41A; border-radius: 50%; }
 
-.pipeline-board { flex: 1; display: flex; align-items: stretch; padding: 30px; gap: 15px; overflow: hidden; }
+.live-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) 140px; gap: 12px; padding: 14px 30px 0; align-items: stretch; }
+.summary-card { background: #FFFFFF; border: 1px solid rgba(18, 46, 138, 0.12); border-radius: 8px; padding: 12px 14px; box-shadow: 0 4px 12px rgba(18, 46, 138, 0.04); }
+.summary-label { font-size: 12px; color: #666; font-weight: bold; }
+.summary-value { margin-top: 5px; font-size: 23px; line-height: 1; font-family: 'JetBrains Mono', Consolas, monospace; font-weight: 900; color: #122E8A; }
+.summary-status { margin-top: 7px; font-size: 11px; font-weight: bold; }
+.summary-status.ok { color: #0F7E3B; }
+.summary-status.warn { color: #F5A623; }
+.summary-status.bad { color: #D9363E; }
+.ops-button { border: 1px solid #122E8A; background: #122E8A; color: #FFFFFF; border-radius: 8px; font-weight: 900; cursor: pointer; box-shadow: 0 4px 12px rgba(18, 46, 138, 0.12); }
+.ops-button:disabled { opacity: 0.6; cursor: not-allowed; }
+.api-error { margin: 10px 30px 0; padding: 10px 14px; background: rgba(217, 54, 62, 0.08); border: 1px solid rgba(217, 54, 62, 0.2); color: #D9363E; border-radius: 6px; font-size: 12px; font-weight: bold; }
+
+.pipeline-board { flex: 1; display: flex; align-items: stretch; padding: 18px 30px 30px; gap: 15px; overflow: hidden; }
 
 .flow-arrow { display: flex; align-items: center; justify-content: center; position: relative; width: 30px; }
 .arrow-line { position: absolute; width: 100%; height: 2px; background: rgba(18, 46, 138, 0.2); }
@@ -350,6 +616,17 @@ onBeforeUnmount(() => {
 .file-item { display: flex; align-items: center; gap: 10px; padding: 10px; border-bottom: 1px solid rgba(18, 46, 138, 0.05); font-size: 13px; }
 .f-info { display: flex; justify-content: space-between; flex: 1; }
 .f-name { color: #333; font-weight: 500; }
+.case-action-panel { margin-top: 14px; padding-top: 12px; border-top: 1px dashed rgba(18, 46, 138, 0.18); }
+.case-action-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.case-action-head strong { color: #122E8A; font-size: 14px; }
+.case-action-head p { margin: 4px 0 0; color: #666; font-size: 12px; line-height: 1.5; }
+.mini-primary { border: 1px solid #122E8A; background: #122E8A; color: #FFFFFF; border-radius: 6px; padding: 8px 10px; font-size: 12px; font-weight: 900; cursor: pointer; white-space: nowrap; }
+.mini-primary:disabled { opacity: 0.62; cursor: not-allowed; }
+.case-mini-row { display: grid; grid-template-columns: 100px 1fr 130px; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(18, 46, 138, 0.06); font-size: 12px; }
+.case-mini-row span { color: #122E8A; font-family: 'JetBrains Mono', Consolas, monospace; font-weight: 900; }
+.case-mini-row b { color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.case-mini-row em { color: #666; font-style: normal; font-family: 'JetBrains Mono', Consolas, monospace; text-align: right; }
+.extract-status { margin-top: 10px; color: #0F7E3B; font-size: 12px; line-height: 1.6; font-weight: bold; }
 
 .terminal-bg { padding: 0; background: #FAFAFA; }
 .terminal-header { background: #EBEBEB; padding: 8px 15px; display: flex; align-items: center; border-bottom: 1px solid #DDD; }

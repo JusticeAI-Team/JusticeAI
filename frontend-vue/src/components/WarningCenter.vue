@@ -24,7 +24,9 @@
             placeholder="输入企业名称或信用代码..." 
           />
         </div>
-        <button class="hud-btn primary" @click="handleSearch">[ 执行检索 ]</button>
+        <button class="hud-btn primary" :disabled="isLoading" @click="handleSearch">
+          {{ isLoading ? '[ 同步中... ]' : '[ 执行检索 ]' }}
+        </button>
       </div>
     </header>
 
@@ -49,6 +51,11 @@
               </tr>
             </thead>
             <tbody>
+              <tr v-if="!filteredWarnings.length">
+                <td colspan="7" class="empty-table-cell">
+                  {{ apiError || '暂无符合条件的预警线索，后端 /alerts 当前没有返回待处理记录。' }}
+                </td>
+              </tr>
               <tr 
                 v-for="row in filteredWarnings" 
                 :key="row.id"
@@ -93,7 +100,7 @@
         <template v-if="currentWarning">
           <div class="inspector-header">
             <span class="record-id mono-text">ID: {{ currentWarning.creditCode }}</span>
-            <span class="status-tag pulse-warn">待人工核准</span>
+            <span class="status-tag pulse-warn">{{ statusLabel(currentWarning.status) }}</span>
           </div>
 
           <h2 class="target-name">{{ currentWarning.subject }}</h2>
@@ -101,7 +108,7 @@
           <div class="info-grid">
             <div class="info-item">
               <span class="i-label">法定代表人:</span>
-              <span class="i-val">{{ currentWarning.legalPerson }}</span>
+            <span class="i-val">{{ currentWarning.legalPerson || '待核实' }}</span>
             </div>
             <div class="info-item">
               <span class="i-label">线索类型:</span>
@@ -110,7 +117,7 @@
           </div>
 
           <div class="ai-report-box">
-            <div class="box-title">> GLM-5.1 双域印证摘要</div>
+            <div class="box-title">> OpenAI-Compatible 风险核查摘要</div>
             <div class="report-content">
               <div class="report-line">
                 <span class="r-label">【12345 热线】</span>
@@ -128,14 +135,16 @@
           </div>
 
           <div class="evidence-tags">
-            <span class="e-tag">跨区域资金回流</span>
-            <span class="e-tag">夜间高频投诉</span>
-            <span class="e-tag">法人关联历史案卷</span>
+            <span v-for="tag in currentWarning.evidenceTags" :key="tag" class="e-tag">{{ tag }}</span>
           </div>
 
           <div class="action-footer">
-            <button class="hud-btn danger block">确认预警并推送监管</button>
-            <button class="hud-btn ghost block">标记为低风险/忽略</button>
+            <button class="hud-btn danger block" :disabled="isActing" @click="setAlertStatus('acknowledged')">
+              确认预警并推送监管
+            </button>
+            <button class="hud-btn ghost block" :disabled="isActing" @click="setAlertStatus('ignored')">
+              标记为低风险/忽略
+            </button>
           </div>
         </template>
 
@@ -151,54 +160,123 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
+import { apiGet, apiPost } from '../api/platform'
 
 const filters = ref({ level: '', subject: '' })
+const warnings = ref([])
+const currentWarning = ref(null)
+const isLoading = ref(false)
+const isActing = ref(false)
+const apiError = ref('')
 
-const warnings = ref([
-  {
-    id: 1, date: '2026-04-26 15:24:11', subject: '华丰建设有限公司', industry: '建筑工程',
-    confidence: 93, level: 'P1', has12345: true, has110: true, creditCode: '91110112MA01XX8899',
-    legalPerson: '张某某', clueType: '欠薪引发群体聚集',
-    summary12345: '近 7 日接收欠薪投诉 47 人次，涉案金额预估 312 万元。',
-    summary110: '昨日 19:30 接警，该工地门口发生劳资纠纷聚集，出警 2 次。',
-    graphInfo: '发现该企业资金池与 3 家空壳公司存在频繁资金拆借。'
-  },
-  {
-    id: 2, date: '2026-04-26 14:10:05', subject: '京运置业发展中心', industry: '金融理财',
-    confidence: 88, level: 'P1', has12345: false, has110: true, creditCode: '91110112MA03ZZ3344',
-    legalPerson: '王某某', clueType: '异常资金募集/非吸',
-    summary12345: '暂未发现显著相关投诉。',
-    summary110: '接获 8 名群众报警称理财产品无法兑付，涉案超 1200 万。',
-    graphInfo: '法人名下另一家公司曾有非法吸收公众存款前科。'
-  },
-  {
-    id: 3, date: '2026-04-26 11:38:22', subject: '通州城建劳务集团', industry: '建筑工程',
-    confidence: 79, level: 'P2', has12345: true, has110: false, creditCode: '91110112MA02YY1122',
-    legalPerson: '李某某', clueType: '工程分包履约异常',
-    summary12345: '接收零星包工头投诉，涉及工程款结算纠纷。',
-    summary110: '无相关警情记录。',
-    graphInfo: '关联上下游 5 家分包商，暂未形成系统性风险网络。'
-  },
-  {
-    id: 4, date: '2026-04-25 16:42:09', subject: '海川商贸服务中心', industry: '商贸流通',
-    confidence: 84, level: 'P2', has12345: true, has110: true, creditCode: '91110112MA04AA5566',
-    legalPerson: '赵某某', clueType: '虚假交易与合同诈骗',
-    summary12345: '多名消费者投诉该商家预付卡跑路，关门停业。',
-    summary110: '周边派出所接到 3 起商户寻衅滋事报警。',
-    graphInfo: '穿透发现该主体已于一周前密集变更法人和股东。'
-  },
-  {
-    id: 5, date: '2026-04-25 09:16:33', subject: '永顺社区便民服务站', industry: '民生服务',
-    confidence: 65, level: 'P2', has12345: true, has110: false, creditCode: '91110112MA06CC9900',
-    legalPerson: '陈某某', clueType: '常规舆情波动',
-    summary12345: '集中反映社区周边夜间施工噪音扰民问题。',
-    summary110: '无相关警情记录。',
-    graphInfo: '孤立事件，未发现深层关联风险。'
+const severityLevel = (severity) => {
+  const normalized = String(severity || '').toLowerCase()
+  if (['critical', 'high'].includes(normalized)) return 'P1'
+  if (['medium', 'warning'].includes(normalized)) return 'P2'
+  return 'P3'
+}
+
+const confidenceFromSeverity = (severity) => {
+  const normalized = String(severity || '').toLowerCase()
+  if (normalized === 'critical') return 96
+  if (normalized === 'high') return 90
+  if (normalized === 'medium') return 78
+  return 62
+}
+
+const formatDate = (value) => {
+  if (!value) return '--'
+  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
+
+const cleanAlertTitle = (title) => String(title || '').replace(/^Alert-|^Demo 预警：/, '').trim()
+
+const statusLabel = (status) => {
+  const map = {
+    open: '待人工核准',
+    acknowledged: '已确认推送',
+    ignored: '已忽略',
+    closed: '已关闭'
   }
-])
+  return map[String(status || '').toLowerCase()] || status || '待核准'
+}
 
-const currentWarning = ref(warnings.value[0])
+const mapAlert = (alert) => {
+  const title = cleanAlertTitle(alert.title)
+  const mergedText = `${title} ${alert.summary || ''}`
+  return {
+    id: alert.id,
+    caseId: alert.case_id,
+    date: formatDate(alert.created_at),
+    subject: title || alert.id,
+    industry: alert.severity || '风险线索',
+    confidence: confidenceFromSeverity(alert.severity),
+    level: severityLevel(alert.severity),
+    has12345: mergedText.includes('12345') || mergedText.includes('热线') || mergedText.includes('信访'),
+    has110: mergedText.includes('110') || mergedText.includes('警情') || mergedText.includes('接警'),
+    creditCode: String(alert.case_id || alert.id).slice(0, 8),
+    legalPerson: '',
+    clueType: alert.severity || 'risk_alert',
+    summary12345: alert.summary || '后端未返回 12345 专项摘要，需进入案件详情查看原始来源。',
+    summary110: mergedText.includes('110') || mergedText.includes('警情') ? alert.summary : '暂无 110 警情交叉印证。',
+    graphInfo: '等待加载案件图谱实体与关系。',
+    status: alert.status,
+    evidenceTags: [alert.severity || 'risk', alert.status || 'open'],
+    raw: alert
+  }
+}
+
+const enrichWarningWithCase = async (warning) => {
+  if (!warning?.caseId) return warning
+  const detail = await apiGet(`/risk/cases/${warning.caseId}`)
+  const caseInfo = detail?.case_info || {}
+  const entities = detail?.entities || []
+  const relations = detail?.relations || []
+  const recommendations = detail?.recommendations || {}
+  const tags = [
+    ...(caseInfo.risk_tags || []),
+    caseInfo.graph_sync_status ? `graph:${caseInfo.graph_sync_status}` : '',
+    caseInfo.vector_sync_status ? `vector:${caseInfo.vector_sync_status}` : ''
+  ].filter(Boolean)
+
+  return {
+    ...warning,
+    subject: caseInfo.title || warning.subject,
+    industry: caseInfo.source_type || warning.industry,
+    confidence: Math.round(caseInfo.risk_score || warning.confidence),
+    level: caseInfo.risk_level === 'high' ? 'P1' : warning.level,
+    has12345: warning.has12345 || caseInfo.source_type === 'hotline_12345',
+    has110: warning.has110 || caseInfo.source_type === 'police_110',
+    creditCode: caseInfo.case_code || warning.creditCode,
+    legalPerson: caseInfo.assignee || '责任人待分派',
+    clueType: `${caseInfo.risk_level || warning.raw?.severity || 'unknown'} / ${caseInfo.review_status || 'pending'}`,
+    summary12345: recommendations.reason_summary || caseInfo.risk_reason_summary || warning.summary12345,
+    summary110: caseInfo.disposal_advice?.join('；') || warning.summary110,
+    graphInfo: `已抽取 ${entities.length} 个实体、${relations.length} 条关系；图谱同步 ${caseInfo.graph_sync_status || 'pending'}，向量索引 ${caseInfo.vector_sync_status || 'pending'}。`,
+    evidenceTags: tags.length ? tags.slice(0, 8) : warning.evidenceTags
+  }
+}
+
+const loadAlerts = async () => {
+  isLoading.value = true
+  apiError.value = ''
+  try {
+    const result = await apiGet('/alerts?page_size=50')
+    warnings.value = (result?.items || []).map(mapAlert)
+    if (warnings.value.length) {
+      await selectRow(warnings.value[0])
+    } else {
+      currentWarning.value = null
+    }
+  } catch (error) {
+    apiError.value = error.message
+    ElMessage.error(`预警列表加载失败：${error.message}`)
+  } finally {
+    isLoading.value = false
+  }
+}
 
 const filteredWarnings = computed(() => {
   return warnings.value.filter((item) => {
@@ -209,15 +287,43 @@ const filteredWarnings = computed(() => {
   })
 })
 
-const selectRow = (row) => { currentWarning.value = row }
+const selectRow = async (row) => {
+  currentWarning.value = row
+  try {
+    currentWarning.value = await enrichWarningWithCase(row)
+  } catch (error) {
+    currentWarning.value = row
+    ElMessage.warning(`案件聚合详情加载失败：${error.message}`)
+  }
+}
 
-const handleSearch = () => {
-  if(filteredWarnings.value.length > 0 && !filteredWarnings.value.includes(currentWarning.value)){
-    currentWarning.value = filteredWarnings.value[0]
+const handleSearch = async () => {
+  if (!warnings.value.length) {
+    await loadAlerts()
+    return
+  }
+  if (filteredWarnings.value.length > 0 && !filteredWarnings.value.includes(currentWarning.value)) {
+    await selectRow(filteredWarnings.value[0])
   } else if (filteredWarnings.value.length === 0) {
     currentWarning.value = null
   }
 }
+
+const setAlertStatus = async (status) => {
+  if (!currentWarning.value || isActing.value) return
+  isActing.value = true
+  try {
+    await apiPost(`/alerts/${currentWarning.value.id}/status`, { status })
+    ElMessage.success(status === 'acknowledged' ? '预警已确认并推送处置' : '预警已标记为忽略')
+    await loadAlerts()
+  } catch (error) {
+    ElMessage.error(`预警状态更新失败：${error.message}`)
+  } finally {
+    isActing.value = false
+  }
+}
+
+onMounted(loadAlerts)
 </script>
 
 <style scoped>
@@ -261,6 +367,7 @@ const handleSearch = () => {
 .hud-btn.danger:hover { background: #B32D33; }
 .hud-btn.ghost { color: #666; border-color: #CCC; background: #FFF; }
 .hud-btn.ghost:hover { border-color: #122E8A; color: #122E8A; background: rgba(18, 46, 138, 0.05); }
+.hud-btn:disabled { opacity: 0.62; cursor: not-allowed; }
 .hud-btn.block { display: block; width: 100%; margin-top: 10px; }
 
 /* 2. 主体分栏区 */
@@ -284,6 +391,7 @@ const handleSearch = () => {
 .data-row:hover { background: rgba(18, 46, 138, 0.02); }
 .data-row.selected-row { background: rgba(18, 46, 138, 0.06); border-left: 3px solid #122E8A; }
 .bloomberg-table td { padding: 12px 16px; color: #333; }
+.empty-table-cell { text-align: center; color: #999 !important; padding: 36px !important; font-weight: bold; }
 
 .dim { color: #666; font-size: 12px; }
 .subject-cell { font-weight: 800; color: #122E8A; font-size: 14px; }
@@ -293,6 +401,7 @@ const handleSearch = () => {
 .level-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 900; font-family: 'JetBrains Mono', sans-serif; }
 .P1 { color: #D9363E; background: rgba(217, 54, 62, 0.1); border: 1px solid rgba(217, 54, 62, 0.3); }
 .P2 { color: #F5A623; background: rgba(245, 166, 35, 0.1); border: 1px solid rgba(245, 166, 35, 0.3); }
+.P3 { color: #0F7E3B; background: rgba(15, 126, 59, 0.1); border: 1px solid rgba(15, 126, 59, 0.25); }
 
 /* 双域印证标签 */
 .dual-domain-tags { display: flex; gap: 6px; }

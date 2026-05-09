@@ -9,7 +9,7 @@
         <button class="hud-btn ghost" :disabled="isGenerating" @click="handleRegenerate">
           <i class="el-icon-refresh"></i> [ 重新生成并校对 ]
         </button>
-        <button class="hud-btn primary">
+        <button class="hud-btn primary" :disabled="!latestReport?.file_path" @click="handleExport">
           [ 签发并导出 PDF ]
         </button>
       </div>
@@ -145,35 +145,196 @@
 </template>
 
 <script setup>
-import { ref, onBeforeUnmount } from 'vue'
+import { ref, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
+import { apiGet, apiPost } from '../api/platform'
 
-const caseQueue = ref([
-  {
-    id: 1, shortId: 'CA-2026-0426', subject: '华丰建设有限公司', code: '91110112MA01XX8899',
-    level: 'crit', levelText: '极高危', type: '欠薪 / 非法集资双重风险',
-    trace12345: '欠薪投诉 47 人次，涉案金额核算约 312 万元。', trace110: '非法集资及劳资纠纷聚集警情，关联 86 人。',
-    traceGraph: '资金池穿透发现向法人名下关联账户高频转移资产。',
-    baseDraft: '《检察建议书（草稿）》\n\n经查，华丰建设有限公司存在严重拖欠农民工工资行为，相关信访平台累计接收欠薪投诉 47 人次，涉及金额 312 万元。根据多源数据交叉比对结果，该主体在劳动关系管理、工程款支付链条及项目资金监管方面存在明显异常。\n\n特此建议。'
-  }
-])
+const defaultCase = {
+  id: '',
+  shortId: '--',
+  subject: '等待加载高危线索',
+  code: '--',
+  level: 'crit',
+  levelText: '待加载',
+  type: '后端风险案件',
+  trace12345: '正在从 /risk/cases 加载案件队列。',
+  trace110: '',
+  traceGraph: '等待图谱/向量同步状态。',
+  baseDraft: '正在加载后端案件与报告生成能力...'
+}
 
-const activeCase = ref(caseQueue.value[0])
-const draftContent = ref(activeCase.value.baseDraft)
+const caseQueue = ref([])
+const activeCase = ref(defaultCase)
+const draftContent = ref(defaultCase.baseDraft)
 const isGenerating = ref(false)
-let typingTimer = null
+const latestReport = ref(null)
+const apiError = ref('')
 
-const selectCase = (c) => {
+const formatDateCompact = () => new Date().toISOString().slice(0, 10)
+
+const splitAdvice = (value) => {
+  if (Array.isArray(value)) return value
+  return String(value || '')
+    .split(/[|；;]\s*/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+const levelText = (riskLevel) => {
+  const normalized = String(riskLevel || '').toLowerCase()
+  if (normalized === 'high') return '高危'
+  if (normalized === 'medium') return '中危'
+  if (normalized === 'low') return '低危'
+  return '待研判'
+}
+
+const levelClass = (riskLevel) => (String(riskLevel || '').toLowerCase() === 'high' ? 'crit' : 'warn')
+
+const buildDraftFromCase = (caseItem, detail = null, report = null) => {
+  if (report?.content_markdown) return report.content_markdown
+  const caseInfo = detail?.case_info || {}
+  const recommendations = detail?.recommendations || {}
+  const advice = splitAdvice(caseInfo.disposal_advice || recommendations.disposal_advice)
+  return [
+    '《检察建议书（AI 草稿）》',
+    '',
+    `线索名称：${caseInfo.title || caseItem.subject}`,
+    `案件编号：${caseInfo.case_code || caseItem.code}`,
+    `风险等级：${levelText(caseInfo.risk_level || caseItem.levelText)}，风险评分：${caseInfo.risk_score ?? '--'}`,
+    '',
+    '一、风险事实摘要',
+    caseInfo.risk_reason_summary || recommendations.reason_summary || caseItem.trace12345 || '后端暂未返回风险原因摘要。',
+    '',
+    '二、多源数据与图谱印证',
+    `来源类型：${caseInfo.source_type || '--'}；属地：${caseInfo.area_name || '--'}。`,
+    `图谱同步：${caseInfo.graph_sync_status || '--'}；向量索引：${caseInfo.vector_sync_status || '--'}。`,
+    caseItem.traceGraph,
+    '',
+    '三、建议处置措施',
+    ...(advice.length ? advice.map((item, index) => `${index + 1}. ${item}`) : ['1. 请承办检察官复核后补充处置建议。']),
+    '',
+    '【复核提示】本草稿由 JusticeAI 调用 OpenAI-compatible 报告/建议链路生成或整理，签发前必须人工复核事实、法条与措辞。'
+  ].join('\n')
+}
+
+const mapCase = (item) => ({
+  id: item.id,
+  shortId: item.case_code || String(item.id).slice(0, 8),
+  subject: item.title || item.case_code,
+  code: item.case_code || String(item.id).slice(0, 8),
+  level: levelClass(item.risk_level),
+  levelText: levelText(item.risk_level),
+  type: `${item.source_type || 'unknown'} / ${item.review_status || 'pending'}`,
+  trace12345: item.risk_reason_summary || '等待案件详情加载风险原因摘要。',
+  trace110: splitAdvice(item.disposal_advice).join('；'),
+  traceGraph: `图谱同步 ${item.graph_sync_status || 'pending'}，向量索引 ${item.vector_sync_status || 'pending'}。`,
+  baseDraft: buildDraftFromCase({
+    subject: item.title,
+    code: item.case_code,
+    trace12345: item.risk_reason_summary,
+    traceGraph: `图谱同步 ${item.graph_sync_status || 'pending'}，向量索引 ${item.vector_sync_status || 'pending'}。`
+  }, { case_info: item })
+})
+
+const loadCases = async () => {
+  apiError.value = ''
+  try {
+    const result = await apiGet('/risk/cases?page_size=20')
+    caseQueue.value = (result?.items || []).map(mapCase)
+    if (caseQueue.value.length) {
+      await selectCase(caseQueue.value[0])
+    } else {
+      activeCase.value = defaultCase
+      draftContent.value = '暂无风险案件，需先在“异构数据接入”完成导入、处理与抽取。'
+    }
+  } catch (error) {
+    apiError.value = error.message
+    draftContent.value = `案件队列加载失败：${error.message}`
+    ElMessage.error(`案件队列加载失败：${error.message}`)
+  }
+}
+
+const selectCase = async (c) => {
   if (isGenerating.value) return
   activeCase.value = c
   draftContent.value = c.baseDraft
+  latestReport.value = null
+  try {
+    const detail = await apiGet(`/risk/cases/${c.id}`)
+    const caseInfo = detail?.case_info || {}
+    const nextCase = {
+      ...c,
+      subject: caseInfo.title || c.subject,
+      code: caseInfo.case_code || c.code,
+      level: levelClass(caseInfo.risk_level),
+      levelText: levelText(caseInfo.risk_level),
+      type: `${caseInfo.source_type || 'unknown'} / ${caseInfo.review_status || 'pending'}`,
+      trace12345: detail?.recommendations?.reason_summary || caseInfo.risk_reason_summary || c.trace12345,
+      trace110: splitAdvice(caseInfo.disposal_advice || detail?.recommendations?.disposal_advice).join('；'),
+      traceGraph: `实体 ${detail?.entities?.length || 0} 个，关系 ${detail?.relations?.length || 0} 条；图谱 ${caseInfo.graph_sync_status || 'pending'}，向量 ${caseInfo.vector_sync_status || 'pending'}。`
+    }
+    activeCase.value = nextCase
+    draftContent.value = buildDraftFromCase(nextCase, detail)
+  } catch (error) {
+    ElMessage.warning(`案件详情加载失败：${error.message}`)
+  }
 }
 
-const handleRegenerate = () => {
-  if (isGenerating.value) return
-  isGenerating.value = true
-  draftContent.value = '正在根据深海蓝主题重新生成文书排版...'
-  setTimeout(() => { isGenerating.value = false; draftContent.value = activeCase.value.baseDraft + '\n\n【已应用智能校对与最新法条】' }, 1500)
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const waitForJob = async (jobId, timeoutMs = 12 * 60 * 1000) => {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const job = await apiGet(`/jobs/${jobId}`)
+    const normalized = String(job.status || '').toLowerCase()
+    draftContent.value = `报告生成任务：${job.status} · ${job.progress_percent}%\n\n${job.message || '等待模型生成报告内容...'}`
+    if (['completed', 'completed_with_warnings', 'failed', 'cancelled'].includes(normalized)) return job
+    await delay(2000)
+  }
+  throw new Error(`报告生成任务 ${jobId} 超时，请到技术运维后台查看。`)
 }
+
+const handleRegenerate = async () => {
+  if (isGenerating.value) return
+  if (!activeCase.value?.id) {
+    ElMessage.warning('暂无可生成文书的案件')
+    return
+  }
+  isGenerating.value = true
+  latestReport.value = null
+  try {
+    const job = await apiPost('/reports/generate/async', {
+      report_type: 'procuratorial_suggestion_draft',
+      period: formatDateCompact(),
+      title: `检察建议书草稿-${activeCase.value.code}`
+    })
+    draftContent.value = `报告生成任务已入队：${job.id}\n\n正在调用 OpenAI-compatible 报告生成链路，请稍候...`
+    const completed = await waitForJob(job.id)
+    if (completed.status === 'failed') {
+      throw new Error(completed.error_message || completed.message || '报告生成失败')
+    }
+    const reportId = completed.result?.report_id || completed.target_id
+    const report = reportId ? await apiGet(`/reports/${reportId}`) : null
+    latestReport.value = report || completed.result || null
+    draftContent.value = buildDraftFromCase(activeCase.value, null, report) || completed.message
+    ElMessage.success('AI 文书草稿已生成')
+  } catch (error) {
+    draftContent.value = `AI 文书生成失败：${error.message}\n\n${activeCase.value.baseDraft}`
+    ElMessage.error(`AI 文书生成失败：${error.message}`)
+  } finally {
+    isGenerating.value = false
+  }
+}
+
+const handleExport = () => {
+  if (!latestReport.value?.file_path) {
+    ElMessage.warning('当前草稿尚未生成后端报告文件')
+    return
+  }
+  ElMessage.info(`报告文件已生成：${latestReport.value.file_path}。PDF 导出服务尚未接入，当前提供 Markdown 草稿审签。`)
+}
+
+onMounted(loadCases)
 </script>
 
 <style scoped>
@@ -196,6 +357,7 @@ const handleRegenerate = () => {
 .hud-btn.primary:hover { background: #0D226A; }
 .hud-btn.ghost { background: transparent; color: #122E8A; border-color: #122E8A; }
 .hud-btn.ghost:hover { background: rgba(18, 46, 138, 0.05); }
+.hud-btn:disabled { opacity: 0.62; cursor: not-allowed; }
 
 .workspace-layout { flex: 1; display: flex; padding: 20px; gap: 20px; overflow: hidden; }
 
@@ -218,6 +380,7 @@ const handleRegenerate = () => {
 .c-id { font-size: 11px; color: #666; font-family: 'JetBrains Mono'; }
 .c-tag { font-size: 10px; padding: 2px 6px; border-radius: 2px; }
 .c-tag.crit { background: rgba(217, 54, 62, 0.1); color: #D9363E; border: 1px solid #D9363E; }
+.c-tag.warn { background: rgba(245, 166, 35, 0.12); color: #B87300; border: 1px solid rgba(245, 166, 35, 0.5); }
 .c-subject { font-size: 14px; font-weight: bold; color: #333; margin: 6px 0 4px; }
 .c-type { font-size: 12px; color: #666; }
 

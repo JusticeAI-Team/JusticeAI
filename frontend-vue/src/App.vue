@@ -35,6 +35,14 @@
           <i class="el-icon-connection"></i>
           <span>异构数据接入</span>
         </el-menu-item>
+        <el-menu-item index="6">
+          <i class="el-icon-monitor"></i>
+          <span>技术运维后台</span>
+        </el-menu-item>
+        <el-menu-item index="7">
+          <i class="el-icon-video-play"></i>
+          <span>全流程演示</span>
+        </el-menu-item>
       </el-menu>
       
       <!-- 左下角系统版本标识 -->
@@ -54,16 +62,16 @@
         
         <div class="header-right">
        
-          <el-dropdown trigger="click">
+          <el-dropdown trigger="click" @command="handleUserCommand">
             <div class="user-profile">
               <div class="avatar-box">检</div>
               <span class="user-name">检察官：测试用户</span>
             </div>
             <template #dropdown>
               <el-dropdown-menu class="hud-dropdown">
-                <el-dropdown-item>个人中心</el-dropdown-item>
-                <el-dropdown-item>系统设置</el-dropdown-item>
-                <el-dropdown-item divided style="color: #D9363E; font-weight: bold;">退出终端</el-dropdown-item>
+                <el-dropdown-item command="profile">个人中心</el-dropdown-item>
+                <el-dropdown-item command="settings">系统设置</el-dropdown-item>
+                <el-dropdown-item command="logout" divided style="color: #D9363E; font-weight: bold;">退出终端</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -77,6 +85,10 @@
           <WarningCenter v-else-if="activeMenu === '3'" />
           <DocumentAssistant v-else-if="activeMenu === '4'" />
           <DataIntegration v-else-if="activeMenu === '5'" />
+          <TechOpsConsole v-else-if="activeMenu === '6'" />
+          <DemoFullFlow v-else-if="activeMenu === '7'" />
+          <UserProfile v-else-if="activeMenu === 'profile'" />
+          <SystemSettings v-else-if="activeMenu === 'settings'" />
           <Dashboard v-else />
         </div>
       </el-main>
@@ -86,16 +98,29 @@
 
 <script setup>
 import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import Dashboard from './components/Dashboard.vue'
 import AgentWorkspace from './components/AgentWorkspace.vue'
 import WarningCenter from './components/WarningCenter.vue'
 import DocumentAssistant from './components/DocumentAssistant.vue'
 import DataIntegration from './components/DataIntegration.vue'
+import TechOpsConsole from './components/TechOpsConsole.vue'
+import DemoFullFlow from './components/DemoFullFlow.vue'
+import UserProfile from './components/UserProfile.vue'
+import SystemSettings from './components/SystemSettings.vue'
 
-const activeMenu = ref('5') // 默认停留你在截图里的页面，可自行更改
+const activeMenu = ref('1')
 
 const handleMenuSelect = (index) => {
   activeMenu.value = index
+}
+
+const handleUserCommand = (command) => {
+  if (command === 'logout') {
+    ElMessage.warning('当前为内网演示终端，退出动作已记录但未接入统一认证。')
+    return
+  }
+  activeMenu.value = command
 }
 </script>
 
