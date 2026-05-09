@@ -29,6 +29,8 @@ export const apiPost = (path, body = {}) =>
     body: JSON.stringify(body)
   })
 
+export const apiDownloadUrl = (path) => buildUrl(path)
+
 export const apiUploadImport = (file) => {
   const formData = new FormData()
   formData.append('file', file)

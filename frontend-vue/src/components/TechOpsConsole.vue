@@ -126,6 +126,7 @@
             <span>状态</span>
             <span>进度</span>
             <span>消息</span>
+            <span>操作</span>
           </div>
           <div v-for="job in jobs" :key="job.id" class="job-row">
             <span class="mono">{{ job.job_type }}</span>
@@ -133,6 +134,9 @@
             <span :class="['badge', statusClass(job.status)]">{{ statusText(job.status) }}</span>
             <span class="mono">{{ job.progress_percent }}%</span>
             <span class="job-message">{{ job.error_message || job.message }}</span>
+            <button class="mini-btn" :disabled="!canRetry(job) || retryingId === job.id" @click="retryJob(job)">
+              {{ retryingId === job.id ? '重试中' : '重试' }}
+            </button>
           </div>
           <div v-if="!jobs.length" class="empty-jobs">暂无后台任务记录</div>
         </div>
@@ -152,6 +156,7 @@ const health = ref(null)
 const integrations = ref(null)
 const probe = ref(null)
 const jobs = ref([])
+const retryingId = ref('')
 
 const localCommands = [
   'docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"',
@@ -191,6 +196,21 @@ const runProbe = async () => {
     error.value = err.message
   } finally {
     testing.value = false
+  }
+}
+
+const canRetry = (job) => ['failed', 'cancelled', 'completed_with_warnings'].includes(String(job.status || '').toLowerCase())
+
+const retryJob = async (job) => {
+  retryingId.value = job.id
+  try {
+    await apiPost(`/jobs/${job.id}/retry`, {})
+    await refreshAll()
+    error.value = ''
+  } catch (err) {
+    error.value = `任务重试失败：${err.message}`
+  } finally {
+    retryingId.value = ''
   }
 }
 
@@ -294,10 +314,11 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 code { display: block; background: #F5EFEA; border: 1px solid rgba(18, 46, 138, 0.12); border-radius: 6px; padding: 12px; color: #122E8A; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; white-space: pre-wrap; }
 .hint { margin: 12px 0 0; color: #666; line-height: 1.7; font-size: 12px; }
 .job-table { display: grid; gap: 8px; }
-.job-row { display: grid; grid-template-columns: 1.1fr 0.8fr 80px 70px 1.8fr; gap: 10px; align-items: center; padding: 10px 12px; background: #FAFAFA; border: 1px solid rgba(18, 46, 138, 0.08); border-radius: 6px; font-size: 12px; color: #333; }
+.job-row { display: grid; grid-template-columns: 1.1fr 0.8fr 80px 70px 1.8fr 76px; gap: 10px; align-items: center; padding: 10px 12px; background: #FAFAFA; border: 1px solid rgba(18, 46, 138, 0.08); border-radius: 6px; font-size: 12px; color: #333; }
 .job-row.head { background: rgba(18, 46, 138, 0.05); color: #122E8A; font-weight: 900; }
 .mono { font-family: 'JetBrains Mono', Consolas, monospace; color: #122E8A; font-weight: 900; }
 .job-message { color: #666; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-btn { height: 28px; padding: 0 10px; border: 1px solid rgba(18, 46, 138, 0.22); background: #FFFFFF; color: #122E8A; border-radius: 6px; font-size: 12px; font-weight: 900; }
 .empty-jobs { padding: 14px; background: #FAFAFA; border: 1px dashed rgba(18, 46, 138, 0.16); border-radius: 6px; color: #666; font-size: 12px; font-weight: bold; }
 @media (max-width: 1180px) { .overview-strip, .dependency-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .ops-grid, .command-grid { grid-template-columns: 1fr; } }
 @media (max-width: 1180px) { .job-row { grid-template-columns: 1fr; } }

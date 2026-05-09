@@ -9,7 +9,7 @@
         <button class="hud-btn ghost" :disabled="isGenerating" @click="handleRegenerate">
           <i class="el-icon-refresh"></i> [ 重新生成并校对 ]
         </button>
-        <button class="hud-btn primary" :disabled="!latestReport?.file_path" @click="handleExport">
+        <button class="hud-btn primary" :disabled="!latestReport?.id" @click="handleExport">
           [ 签发并导出 PDF ]
         </button>
       </div>
@@ -147,7 +147,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { apiGet, apiPost } from '../api/platform'
+import { apiDownloadUrl, apiGet, apiPost } from '../api/platform'
 
 const defaultCase = {
   id: '',
@@ -327,11 +327,12 @@ const handleRegenerate = async () => {
 }
 
 const handleExport = () => {
-  if (!latestReport.value?.file_path) {
+  if (!latestReport.value?.id) {
     ElMessage.warning('当前草稿尚未生成后端报告文件')
     return
   }
-  ElMessage.info(`报告文件已生成：${latestReport.value.file_path}。PDF 导出服务尚未接入，当前提供 Markdown 草稿审签。`)
+  window.open(apiDownloadUrl(`/reports/${latestReport.value.id}/download`), '_blank')
+  ElMessage.success('已请求下载后端 Markdown 报告文件')
 }
 
 onMounted(loadCases)

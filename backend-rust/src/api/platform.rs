@@ -2,6 +2,8 @@ use std::{collections::HashMap, fs};
 
 use axum::{
     extract::{Path, Query, State},
+    http::{header, HeaderMap, HeaderValue},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -73,6 +75,7 @@ pub fn routes() -> Router<AppState> {
         .route("/risk/cases", get(risk_case_list))
         .route("/risk/cases/:id", get(risk_case_detail_view))
         .route("/risk/cases/:id/status", post(update_risk_case_status))
+        .route("/agent/analyze", post(agent_analyze))
         .route("/alerts/summary", get(alerts_summary_view))
         .route("/alerts", get(alert_list))
         .route("/alerts/:id", get(alert_detail))
@@ -91,11 +94,13 @@ pub fn routes() -> Router<AppState> {
         .route("/supervision/failures", get(supervision_failures))
         .route("/jobs", get(job_list))
         .route("/jobs/:id", get(job_detail))
+        .route("/jobs/:id/retry", post(retry_platform_job))
         .route("/reports/summary", get(report_summary))
         .route("/reports", get(report_list).post(create_report_live))
         .route("/reports/generate", post(create_report_live))
         .route("/reports/generate/async", post(start_report_job))
         .route("/reports/:id", get(report_detail))
+        .route("/reports/:id/download", get(download_report))
         .route("/reports/:id/regenerate", post(regenerate_report))
         .route(
             "/settings/platform",
@@ -319,6 +324,14 @@ struct CreateReportRequest {
     report_type: String,
     period: String,
     title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct AgentAnalyzeRequest {
+    query: Option<String>,
+    case_id: Option<Uuid>,
+    intent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -856,6 +869,55 @@ struct RecommendationBundle {
     reference_cases: Vec<SimilarCaseReference>,
     is_placeholder: bool,
     model_contract: AiModelContract,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct AgentGraphNode {
+    id: String,
+    label: String,
+    node_type: String,
+    size: u32,
+    color: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct AgentGraphEdge {
+    source: String,
+    target: String,
+    label: String,
+    confidence: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct AgentAnalyzeResponse {
+    generated_at: String,
+    intent: String,
+    matched_case_id: String,
+    matched_by: String,
+    query: String,
+    case_detail: RiskCaseDetailResponse,
+    answer_markdown: String,
+    graph: AgentGraphPayload,
+    sync_status: AgentSyncStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct AgentGraphPayload {
+    nodes: Vec<AgentGraphNode>,
+    edges: Vec<AgentGraphEdge>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct AgentSyncStatus {
+    graph_sync_status: String,
+    graph_sync_message: String,
+    vector_sync_status: String,
+    vector_sync_message: String,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -3384,6 +3446,13 @@ async fn risk_case_detail_view(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<RiskCaseDetailResponse>>, AppError> {
+    Ok(ok(load_risk_case_detail(&state, id).await?))
+}
+
+async fn load_risk_case_detail(
+    state: &AppState,
+    id: Uuid,
+) -> Result<RiskCaseDetailResponse, AppError> {
     let case_info = sqlx::query_as::<_, RiskCaseListItem>(
         r#"
         SELECT id, case_code, title, source_type, area_name, risk_level, risk_score,
@@ -3530,7 +3599,7 @@ async fn risk_case_detail_view(
         split_pipe_values(stored_disposal_advice)
     };
 
-    Ok(ok(RiskCaseDetailResponse {
+    Ok(RiskCaseDetailResponse {
         case_info: RiskCaseView {
             id: case_info.id.to_string(),
             case_code: case_info.case_code,
@@ -3573,7 +3642,7 @@ async fn risk_case_detail_view(
             is_placeholder: recommendation.is_placeholder,
             model_contract: recommendation.model_contract,
         },
-    }))
+    })
 }
 
 async fn update_risk_case_status(
@@ -3608,6 +3677,65 @@ async fn update_risk_case_status(
         message: "risk case status updated".to_string(),
         updated_at: now_at.to_rfc3339(),
         is_placeholder: false,
+    }))
+}
+
+async fn agent_analyze(
+    State(state): State<AppState>,
+    Json(payload): Json<AgentAnalyzeRequest>,
+) -> Result<Json<ApiResponse<AgentAnalyzeResponse>>, AppError> {
+    let intent = payload
+        .intent
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("risk_judgement")
+        .to_string();
+    let query = payload
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("")
+        .to_string();
+
+    let (case_id, matched_by) = match payload.case_id {
+        Some(case_id) => (case_id, "case_id".to_string()),
+        None => {
+            if query.is_empty() {
+                return Err(AppError::Validation(
+                    "case_id or query is required for agent analysis".to_string(),
+                ));
+            }
+            (
+                find_case_for_agent_query(state.db(), &query)
+                    .await?
+                    .ok_or(AppError::NotFound)?,
+                "query".to_string(),
+            )
+        }
+    };
+
+    let detail = load_risk_case_detail(&state, case_id).await?;
+    let answer_markdown = build_agent_answer_markdown(&intent, &query, &detail);
+    let graph = build_agent_graph_payload(&detail);
+    let sync_status = AgentSyncStatus {
+        graph_sync_status: detail.case_info.graph_sync_status.clone(),
+        graph_sync_message: detail.case_info.graph_sync_message.clone(),
+        vector_sync_status: detail.case_info.vector_sync_status.clone(),
+        vector_sync_message: detail.case_info.vector_sync_message.clone(),
+    };
+
+    Ok(ok(AgentAnalyzeResponse {
+        generated_at: now(),
+        intent,
+        matched_case_id: detail.case_info.id.clone(),
+        matched_by,
+        query,
+        case_detail: detail,
+        answer_markdown,
+        graph,
+        sync_status,
     }))
 }
 
@@ -4380,6 +4508,137 @@ async fn job_detail(
     Ok(ok(get_platform_job(state.db(), id).await?))
 }
 
+async fn retry_platform_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<JobDto>>, AppError> {
+    let previous = get_platform_job(state.db(), id).await?;
+    let normalized_status = previous.status.to_ascii_lowercase();
+    if !matches!(
+        normalized_status.as_str(),
+        "failed" | "cancelled" | "completed_with_warnings"
+    ) {
+        return Err(AppError::Validation(
+            "only failed, cancelled or completed_with_warnings jobs can be retried".to_string(),
+        ));
+    }
+
+    match previous.job_type.as_str() {
+        "ingestion_processing" => {
+            let target_id = parse_job_target_uuid(&previous)?;
+            ensure_import_exists(state.db(), target_id).await?;
+            let job_id = Uuid::new_v4();
+            let job = insert_platform_job(
+                state.db(),
+                job_id,
+                "ingestion_processing",
+                "import",
+                Some(target_id),
+                serde_json::json!({
+                    "import_id": target_id,
+                    "action": "process_import_batch",
+                    "mode": "async_retry",
+                    "retry_of": previous.id
+                }),
+                "queued retry import processing job",
+            )
+            .await?;
+            spawn_ingestion_processing_job(state, job_id, target_id);
+            Ok(ok(job))
+        }
+        "knowledge_extraction" => {
+            let case_ids = previous
+                .request
+                .get("case_ids")
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .filter_map(|value| Uuid::parse_str(value).ok())
+                        .collect::<Vec<_>>()
+                })
+                .filter(|values| !values.is_empty());
+            let mode = previous
+                .request
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .or_else(|| Some("incremental".to_string()));
+
+            let payload = CreateExtractionRunRequest { case_ids, mode };
+            let job_id = Uuid::new_v4();
+            let job = insert_platform_job(
+                state.db(),
+                job_id,
+                "knowledge_extraction",
+                "extraction_run",
+                None,
+                serde_json::json!({
+                    "case_ids": payload.case_ids,
+                    "mode": payload.mode,
+                    "action": "execute_extraction_run",
+                    "retry_of": previous.id
+                }),
+                "queued retry extraction job",
+            )
+            .await?;
+            spawn_extraction_job(state, job_id, payload);
+            Ok(ok(job))
+        }
+        "report_generation" => {
+            let report_type = previous
+                .request
+                .get("report_type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    AppError::Validation("previous report job has no report_type".to_string())
+                })?
+                .to_string();
+            let period = previous
+                .request
+                .get("period")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    AppError::Validation("previous report job has no period".to_string())
+                })?
+                .to_string();
+            let title = previous
+                .request
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let payload = CreateReportRequest {
+                report_type,
+                period,
+                title,
+            };
+            let job_id = Uuid::new_v4();
+            let job = insert_platform_job(
+                state.db(),
+                job_id,
+                "report_generation",
+                "report",
+                None,
+                serde_json::json!({
+                    "report_type": payload.report_type,
+                    "period": payload.period,
+                    "title": payload.title,
+                    "action": "generate_report",
+                    "retry_of": previous.id
+                }),
+                "queued retry report generation job",
+            )
+            .await?;
+            spawn_report_job(state, job_id, payload);
+            Ok(ok(job))
+        }
+        other => Err(AppError::Validation(format!(
+            "job type {other} does not support retry yet"
+        ))),
+    }
+}
+
 async fn report_summary(
     State(state): State<AppState>,
 ) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
@@ -4615,6 +4874,50 @@ async fn report_detail(
         report: item,
         content_markdown,
     }))
+}
+
+async fn download_report(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let item = sqlx::query_as::<_, ReportListItem>(
+        r#"
+        SELECT id, title, report_type, period, status, file_path, summary, provider_style, model_name, generated_at, created_at
+        FROM generated_reports
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or(AppError::NotFound)?;
+
+    let file_path = item
+        .file_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(AppError::NotFound)?;
+    let bytes = fs::read(file_path).map_err(|_| AppError::NotFound)?;
+    let filename = format!(
+        "{}-{}.md",
+        sanitize_download_name(&item.report_type),
+        sanitize_download_name(&item.period)
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .map_err(|_| AppError::Internal)?,
+    );
+
+    Ok((headers, bytes))
 }
 
 async fn regenerate_report(
@@ -5640,6 +5943,232 @@ async fn load_setting_map(
         .into_iter()
         .map(|row| (row.setting_key, row.setting_value))
         .collect())
+}
+
+async fn find_case_for_agent_query(
+    db: &sqlx::PgPool,
+    query: &str,
+) -> Result<Option<Uuid>, AppError> {
+    let keyword = query.trim();
+    if keyword.is_empty() {
+        return Ok(None);
+    }
+    let like_pattern = format!("%{keyword}%");
+
+    let exact = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM risk_cases
+        WHERE case_code = $1
+           OR title = $1
+        ORDER BY risk_score DESC, updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(keyword)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    if exact.is_some() {
+        return Ok(exact);
+    }
+
+    let fuzzy = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM risk_cases
+        WHERE case_code ILIKE $1
+           OR title ILIKE $1
+           OR area_name ILIKE $1
+           OR source_type ILIKE $1
+           OR risk_tags ILIKE $1
+           OR risk_reason_summary ILIKE $1
+        ORDER BY risk_score DESC, updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&like_pattern)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    if fuzzy.is_some() {
+        return Ok(fuzzy);
+    }
+
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM risk_cases
+        ORDER BY risk_score DESC, updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)
+}
+
+fn build_agent_answer_markdown(
+    intent: &str,
+    query: &str,
+    detail: &RiskCaseDetailResponse,
+) -> String {
+    let case_info = &detail.case_info;
+    let advice = if detail.recommendations.disposal_advice.is_empty() {
+        "暂无明确处置建议，需承办检察官结合原始材料复核。".to_string()
+    } else {
+        detail
+            .recommendations
+            .disposal_advice
+            .iter()
+            .enumerate()
+            .map(|(index, item)| format!("{}. {}", index + 1, item))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let reference_cases = if detail.recommendations.reference_cases.is_empty() {
+        "暂未召回相似案件；请确认 Milvus 向量链路是否已完成索引。".to_string()
+    } else {
+        detail
+            .recommendations
+            .reference_cases
+            .iter()
+            .map(|item| {
+                format!(
+                    "- {} / {} / {} / 相似度 {:.3}",
+                    item.case_code, item.title, item.risk_level, item.score
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let entity_names = detail
+        .entities
+        .iter()
+        .take(8)
+        .map(|item| format!("{}({})", item.entity_name, item.entity_type))
+        .collect::<Vec<_>>()
+        .join("、");
+
+    format!(
+        "### 智能研判结果\n\
+         - 意图：{}\n\
+         - 查询：{}\n\
+         - 命中案件：{} / {}\n\
+         - 风险等级：{}，评分：{}\n\
+         - 属地与来源：{} / {}\n\
+         - 外部同步：HugeGraph={}，Milvus={}\n\n\
+         #### 风险原因\n\
+         {}\n\n\
+         #### 关键实体与关系\n\
+         已抽取实体 {} 个、关系 {} 条。{}\n\n\
+         #### 相似案件召回\n\
+         {}\n\n\
+         #### 处置建议\n\
+         {}\n\n\
+         > 本结果来自 JusticeAI 后端统一 Agent 分析契约，结合 PostgreSQL 案件、知识抽取结果、HugeGraph/Milvus 同步状态与 OpenAI-compatible 风险建议链路生成，正式处置前仍需人工复核。",
+        intent,
+        if query.trim().is_empty() {
+            "按案件 ID 直接研判"
+        } else {
+            query
+        },
+        case_info.case_code,
+        case_info.title,
+        case_info.risk_level,
+        case_info.risk_score,
+        case_info.area_name,
+        case_info.source_type,
+        case_info.graph_sync_status,
+        case_info.vector_sync_status,
+        if detail.recommendations.reason_summary.trim().is_empty() {
+            "后端暂未形成风险原因摘要。"
+        } else {
+            detail.recommendations.reason_summary.trim()
+        },
+        detail.entities.len(),
+        detail.relations.len(),
+        if entity_names.is_empty() {
+            "暂无实体。".to_string()
+        } else {
+            format!("重点实体：{entity_names}。")
+        },
+        reference_cases,
+        advice
+    )
+}
+
+fn build_agent_graph_payload(detail: &RiskCaseDetailResponse) -> AgentGraphPayload {
+    let case_id = detail.case_info.id.clone();
+    let mut nodes = vec![AgentGraphNode {
+        id: case_id.clone(),
+        label: detail.case_info.case_code.clone(),
+        node_type: "case".to_string(),
+        size: 56,
+        color: "#122E8A".to_string(),
+    }];
+    nodes.extend(detail.entities.iter().enumerate().map(|(index, item)| {
+        let color = match item.entity_type.as_str() {
+            "person" | "自然人" => "#8B5CF6",
+            "organization" | "enterprise" | "企业" | "机构" => "#4A90E2",
+            "risk" | "风险点" => "#D9363E",
+            _ => ["#4A90E2", "#8B5CF6", "#F5A623", "#D9363E"][index % 4],
+        };
+        AgentGraphNode {
+            id: item.id.to_string(),
+            label: item.entity_name.clone(),
+            node_type: item.entity_type.clone(),
+            size: ((item.confidence * 42.0).round() as u32).clamp(24, 48),
+            color: color.to_string(),
+        }
+    }));
+
+    let mut edges = detail
+        .entities
+        .iter()
+        .map(|item| AgentGraphEdge {
+            source: case_id.clone(),
+            target: item.id.to_string(),
+            label: item.entity_type.clone(),
+            confidence: item.confidence,
+        })
+        .collect::<Vec<_>>();
+    edges.extend(detail.relations.iter().map(|item| AgentGraphEdge {
+        source: item.source_entity_id.to_string(),
+        target: item.target_entity_id.to_string(),
+        label: item.relation_type.clone(),
+        confidence: item.confidence,
+    }));
+
+    AgentGraphPayload { nodes, edges }
+}
+
+fn parse_job_target_uuid(job: &JobDto) -> Result<Uuid, AppError> {
+    job.target_id
+        .as_deref()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .or_else(|| {
+            job.request
+                .get("import_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+        })
+        .ok_or_else(|| AppError::Validation("job target id is missing".to_string()))
+}
+
+fn sanitize_download_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
 
 async fn upsert_setting(
