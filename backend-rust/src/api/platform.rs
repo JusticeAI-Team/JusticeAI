@@ -22,7 +22,7 @@ use crate::{
         embedding::{EmbeddingContract, OpenAiCompatibleEmbeddingService},
         graph::{GraphCaseSyncInput, GraphEntitySync, GraphRelationSync, HugeGraphSyncService},
         pipeline::{execute_extraction_run, process_import_batch},
-        vector::{MilvusVectorStore, SimilarCaseHit},
+        vector::{MilvusVectorStore, SimilarCaseHit, VectorCaseDocument, VectorSearchQuery},
     },
     shared::{
         error::AppError,
@@ -70,6 +70,8 @@ pub fn routes() -> Router<AppState> {
         .route("/graph/overview", get(graph_overview))
         .route("/graph/cases/:id", get(graph_case_view))
         .route("/graph/cases/:id/rebuild", post(rebuild_graph_case))
+        .route("/vectors/cases/:id/rebuild", post(rebuild_case_vector))
+        .route("/vectors/cases/:id/similar", get(case_vector_similar))
         .route("/risk/summary", get(risk_summary))
         .route("/risk/overview", get(risk_overview))
         .route("/risk/cases", get(risk_case_list))
@@ -265,6 +267,11 @@ struct JobQuery {
     page_size: Option<i64>,
     status: Option<String>,
     job_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SimilarQuery {
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -918,6 +925,30 @@ struct AgentSyncStatus {
     graph_sync_message: String,
     vector_sync_status: String,
     vector_sync_message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct VectorActionResponse {
+    case_id: String,
+    case_code: String,
+    status: String,
+    message: String,
+    embedding_dimension: usize,
+    model_contract: EmbeddingContract,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct SimilarCaseResponse {
+    case_id: String,
+    case_code: String,
+    query_text: String,
+    embedding_dimension: usize,
+    model_contract: EmbeddingContract,
+    items: Vec<SimilarCaseReference>,
+    generated_at: String,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -3267,6 +3298,107 @@ async fn rebuild_graph_case(
             }))
         }
     }
+}
+
+async fn rebuild_case_vector(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<VectorActionResponse>>, AppError> {
+    let document = load_vector_case_document(state.db(), id).await?;
+    let integration_values = load_setting_map(state.db(), "integrations").await?;
+    let embedding_service = build_embedding_service(&state, &integration_values);
+    let vector_store = build_vector_store(&state, &integration_values);
+    let query_text = vector_document_text(&document);
+    let embedding = embedding_service
+        .embed_text(&query_text)
+        .await
+        .map_err(|error| AppError::DependencyUnavailable(format!("embedding failed: {error}")))?;
+    let embedding_dimension = embedding.len();
+    let sync_result = vector_store
+        .upsert_case_vector(&document, &embedding)
+        .await
+        .map_err(|error| {
+            AppError::DependencyUnavailable(format!("milvus upsert failed: {error}"))
+        })?;
+    let now_at = Utc::now();
+    update_case_vector_sync_status(
+        state.db(),
+        id,
+        &sync_result.status,
+        &sync_result.message,
+        now_at,
+    )
+    .await?;
+    insert_workflow_run(
+        state.db(),
+        "vector",
+        "Vector Index",
+        if sync_result.status == "indexed" {
+            "completed"
+        } else {
+            "completed_with_warnings"
+        },
+        1,
+        if sync_result.status == "indexed" {
+            1
+        } else {
+            0
+        },
+        if sync_result.status == "indexed" {
+            0
+        } else {
+            1
+        },
+        now_at,
+    )
+    .await?;
+
+    Ok(ok(VectorActionResponse {
+        case_id: document.case_id,
+        case_code: document.case_code,
+        status: sync_result.status,
+        message: sync_result.message,
+        embedding_dimension,
+        model_contract: embedding_service.contract(),
+        updated_at: now_at.to_rfc3339(),
+    }))
+}
+
+async fn case_vector_similar(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SimilarQuery>,
+) -> Result<Json<ApiResponse<SimilarCaseResponse>>, AppError> {
+    let document = load_vector_case_document(state.db(), id).await?;
+    let integration_values = load_setting_map(state.db(), "integrations").await?;
+    let embedding_service = build_embedding_service(&state, &integration_values);
+    let vector_store = build_vector_store(&state, &integration_values);
+    let query_text = vector_document_text(&document);
+    let embedding = embedding_service
+        .embed_text(&query_text)
+        .await
+        .map_err(|error| AppError::DependencyUnavailable(format!("embedding failed: {error}")))?;
+    let embedding_dimension = embedding.len();
+    let hits = vector_store
+        .search_similar_cases(&VectorSearchQuery {
+            embedding,
+            exclude_case_id: Some(document.case_id.clone()),
+            limit: query.limit.unwrap_or(5).clamp(1, 20),
+        })
+        .await
+        .map_err(|error| {
+            AppError::DependencyUnavailable(format!("milvus search failed: {error}"))
+        })?;
+
+    Ok(ok(SimilarCaseResponse {
+        case_id: document.case_id,
+        case_code: document.case_code,
+        query_text,
+        embedding_dimension,
+        model_contract: embedding_service.contract(),
+        items: hits.into_iter().map(map_similar_case_reference).collect(),
+        generated_at: now(),
+    }))
 }
 
 async fn risk_summary(
@@ -5910,6 +6042,33 @@ async fn update_risk_case_graph_sync_status(
     Ok(())
 }
 
+async fn update_case_vector_sync_status(
+    db: &sqlx::PgPool,
+    case_id: Uuid,
+    status: &str,
+    message: &str,
+    synced_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE risk_cases
+        SET vector_sync_status = $2,
+            vector_sync_message = $3,
+            vector_synced_at = $4,
+            updated_at = $4
+        WHERE id = $1
+        "#,
+    )
+    .bind(case_id)
+    .bind(status)
+    .bind(truncate_sync_message(message))
+    .bind(synced_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
 async fn load_mapping_field_rows(
     db: &sqlx::PgPool,
     template_id: Uuid,
@@ -6006,6 +6165,64 @@ async fn find_case_for_agent_query(
     .fetch_optional(db)
     .await
     .map_err(|_| AppError::Internal)
+}
+
+async fn load_vector_case_document(
+    db: &sqlx::PgPool,
+    case_id: Uuid,
+) -> Result<VectorCaseDocument, AppError> {
+    let row = sqlx::query_as::<_, RiskCaseListItem>(
+        r#"
+        SELECT id, case_code, title, source_type, area_name, risk_level, risk_score,
+               status, alert_status, assignee, occurred_at, due_at, closed_at,
+               report_period, review_status, risk_tags, risk_reason_summary, disposal_advice,
+               graph_sync_status, graph_sync_message, graph_synced_at,
+               vector_sync_status, vector_sync_message, vector_synced_at,
+               created_at, updated_at
+        FROM risk_cases
+        WHERE id = $1
+        "#,
+    )
+    .bind(case_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or(AppError::NotFound)?;
+
+    let summary = [
+        row.risk_reason_summary.trim(),
+        row.disposal_advice.trim(),
+        row.risk_tags.trim(),
+    ]
+    .into_iter()
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    Ok(VectorCaseDocument {
+        id: row.id.to_string(),
+        case_id: row.id.to_string(),
+        case_code: row.case_code,
+        title: row.title,
+        summary,
+        risk_level: row.risk_level,
+        source_type: row.source_type,
+        area_name: row.area_name,
+    })
+}
+
+fn vector_document_text(document: &VectorCaseDocument) -> String {
+    [
+        document.title.as_str(),
+        document.summary.as_str(),
+        document.area_name.as_str(),
+        document.risk_level.as_str(),
+        document.source_type.as_str(),
+    ]
+    .into_iter()
+    .filter(|value| !value.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 fn build_agent_answer_markdown(

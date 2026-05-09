@@ -97,6 +97,45 @@
         </div>
       </section>
 
+      <section class="panel vector-panel">
+        <div class="panel-header">
+          <span class="bar green"></span>
+          <div>
+            <div class="kicker">VECTOR OPS</div>
+            <h3>Milvus 向量链路验证</h3>
+          </div>
+        </div>
+        <div class="vector-box">
+          <div class="case-line">
+            <div>
+              <strong>{{ vectorCase?.case_code || '--' }}</strong>
+              <p>{{ vectorCase?.title || '暂无可验证案件，请先导入并生成风险案件。' }}</p>
+            </div>
+            <span :class="['badge', statusClass(vectorCase?.vector_sync_status)]">
+              {{ statusText(vectorCase?.vector_sync_status) }}
+            </span>
+          </div>
+          <div class="vector-actions">
+            <button class="ghost-btn" :disabled="vectorLoading || !vectorCase?.id" @click="loadVectorCase">换一个案件</button>
+            <button class="primary-btn" :disabled="vectorLoading || !vectorCase?.id" @click="rebuildVector">
+              {{ vectorLoading ? '执行中...' : '重建向量索引' }}
+            </button>
+            <button class="ghost-btn" :disabled="vectorLoading || !vectorCase?.id" @click="searchSimilar">检索相似案件</button>
+          </div>
+          <p v-if="vectorResult" class="vector-result">
+            {{ vectorResult.status || 'search' }} · 维度 {{ vectorResult.embedding_dimension || '--' }} ·
+            {{ vectorResult.model_contract?.model_name || '--' }}
+          </p>
+          <div v-if="similarItems.length" class="similar-list">
+            <div v-for="item in similarItems" :key="item.id" class="similar-item">
+              <span class="mono">{{ item.case_code }}</span>
+              <span>{{ item.title }}</span>
+              <span class="mono">{{ Number(item.score || 0).toFixed(3) }}</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="panel command-panel">
         <div class="panel-header">
           <span class="bar green"></span>
@@ -157,6 +196,10 @@ const integrations = ref(null)
 const probe = ref(null)
 const jobs = ref([])
 const retryingId = ref('')
+const vectorCase = ref(null)
+const vectorResult = ref(null)
+const similarItems = ref([])
+const vectorLoading = ref(false)
 
 const localCommands = [
   'docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"',
@@ -179,11 +222,64 @@ const refreshAll = async () => {
     health.value = healthResult
     integrations.value = integrationResult
     jobs.value = jobResult?.items || []
+    if (!vectorCase.value) {
+      await loadVectorCase()
+    }
     error.value = ''
   } catch (err) {
     error.value = err.message
   } finally {
     loading.value = false
+  }
+}
+
+const loadVectorCase = async () => {
+  vectorLoading.value = true
+  try {
+    const result = await apiGet('/risk/cases?page_size=1&risk_level=high')
+    vectorCase.value = result?.items?.[0] || null
+    vectorResult.value = null
+    similarItems.value = []
+    error.value = ''
+  } catch (err) {
+    error.value = `向量验证案件加载失败：${err.message}`
+  } finally {
+    vectorLoading.value = false
+  }
+}
+
+const refreshVectorCaseDetail = async () => {
+  if (!vectorCase.value?.id) return
+  const detail = await apiGet(`/risk/cases/${vectorCase.value.id}`)
+  vectorCase.value = detail?.case_info || vectorCase.value
+}
+
+const rebuildVector = async () => {
+  if (!vectorCase.value?.id) return
+  vectorLoading.value = true
+  try {
+    vectorResult.value = await apiPost(`/vectors/cases/${vectorCase.value.id}/rebuild`, {})
+    await refreshVectorCaseDetail()
+    error.value = ''
+  } catch (err) {
+    error.value = `向量索引重建失败：${err.message}`
+  } finally {
+    vectorLoading.value = false
+  }
+}
+
+const searchSimilar = async () => {
+  if (!vectorCase.value?.id) return
+  vectorLoading.value = true
+  try {
+    const result = await apiGet(`/vectors/cases/${vectorCase.value.id}/similar?limit=5`)
+    vectorResult.value = result
+    similarItems.value = result?.items || []
+    error.value = ''
+  } catch (err) {
+    error.value = `相似案件检索失败：${err.message}`
+  } finally {
+    vectorLoading.value = false
   }
 }
 
@@ -310,6 +406,15 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 .node-dot { width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; background: #F5A623; flex-shrink: 0; }
 .node-dot.ok { background: #52C41A; }
 .node-dot.warn { background: #F5A623; }
+.vector-panel { grid-column: 1 / -1; }
+.vector-box { display: grid; gap: 12px; }
+.case-line { display: flex; justify-content: space-between; gap: 16px; align-items: center; background: #FAFAFA; border: 1px solid rgba(18, 46, 138, 0.08); border-radius: 6px; padding: 12px; }
+.case-line strong { color: #122E8A; }
+.case-line p { margin: 5px 0 0; color: #666; font-size: 12px; line-height: 1.6; }
+.vector-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.vector-result { margin: 0; color: #122E8A; font-weight: 900; font-size: 12px; }
+.similar-list { display: grid; gap: 8px; }
+.similar-item { display: grid; grid-template-columns: 180px 1fr 70px; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 6px; background: #FAFAFA; border: 1px solid rgba(18, 46, 138, 0.08); color: #333; font-size: 12px; }
 .command-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 code { display: block; background: #F5EFEA; border: 1px solid rgba(18, 46, 138, 0.12); border-radius: 6px; padding: 12px; color: #122E8A; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; white-space: pre-wrap; }
 .hint { margin: 12px 0 0; color: #666; line-height: 1.7; font-size: 12px; }
