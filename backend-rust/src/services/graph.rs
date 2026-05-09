@@ -99,82 +99,108 @@ impl HugeGraphSyncService {
     }
 
     async fn ensure_schema(&self) -> Result<(), String> {
-        let script = r#"
-schema = graph.schema();
-schema.propertyKey('vertex_key').asText().ifNotExist().create();
-schema.propertyKey('case_id').asText().ifNotExist().create();
-schema.propertyKey('case_code').asText().ifNotExist().create();
-schema.propertyKey('title').asText().ifNotExist().create();
-schema.propertyKey('area_name').asText().ifNotExist().create();
-schema.propertyKey('risk_level').asText().ifNotExist().create();
-schema.propertyKey('source_type').asText().ifNotExist().create();
-schema.propertyKey('entity_type').asText().ifNotExist().create();
-schema.propertyKey('entity_name').asText().ifNotExist().create();
-schema.propertyKey('confidence').asDouble().ifNotExist().create();
-schema.propertyKey('relation_type').asText().ifNotExist().create();
-schema.propertyKey('updated_at').asText().ifNotExist().create();
-schema.vertexLabel('risk_case')
-    .properties('vertex_key', 'case_id', 'case_code', 'title', 'area_name', 'risk_level', 'source_type', 'updated_at')
-    .primaryKeys('vertex_key')
-    .nullableKeys('area_name', 'risk_level', 'source_type', 'updated_at')
-    .ifNotExist()
-    .create();
-schema.vertexLabel('kg_entity')
-    .properties('vertex_key', 'case_id', 'entity_type', 'entity_name', 'confidence', 'updated_at')
-    .primaryKeys('vertex_key')
-    .nullableKeys('confidence', 'updated_at')
-    .ifNotExist()
-    .create();
-schema.edgeLabel('case_has_entity')
-    .sourceLabel('risk_case')
-    .targetLabel('kg_entity')
-    .properties('case_id', 'relation_type', 'confidence', 'updated_at')
-    .nullableKeys('confidence', 'updated_at')
-    .ifNotExist()
-    .create();
-schema.edgeLabel('entity_related_to')
-    .sourceLabel('kg_entity')
-    .targetLabel('kg_entity')
-    .properties('case_id', 'relation_type', 'confidence', 'updated_at')
-    .nullableKeys('confidence', 'updated_at')
-    .ifNotExist()
-    .create();
-        "#;
-        self.run_gremlin(script).await.map(|_| ())
+        for property in [
+            json!({ "name": "case_id", "data_type": "TEXT", "cardinality": "SINGLE" }),
+            json!({ "name": "case_code", "data_type": "TEXT", "cardinality": "SINGLE" }),
+            json!({ "name": "title", "data_type": "TEXT", "cardinality": "SINGLE" }),
+            json!({ "name": "area_name", "data_type": "TEXT", "cardinality": "SINGLE" }),
+            json!({ "name": "risk_level", "data_type": "TEXT", "cardinality": "SINGLE" }),
+            json!({ "name": "source_type", "data_type": "TEXT", "cardinality": "SINGLE" }),
+            json!({ "name": "entity_type", "data_type": "TEXT", "cardinality": "SINGLE" }),
+            json!({ "name": "entity_name", "data_type": "TEXT", "cardinality": "SINGLE" }),
+            json!({ "name": "confidence", "data_type": "DOUBLE", "cardinality": "SINGLE" }),
+            json!({ "name": "relation_type", "data_type": "TEXT", "cardinality": "SINGLE" }),
+            json!({ "name": "updated_at", "data_type": "TEXT", "cardinality": "SINGLE" }),
+        ] {
+            let _ = self.post_schema("propertykeys", property).await;
+        }
+
+        let _ = self
+            .post_schema(
+                "vertexlabels",
+                json!({
+                    "name": "risk_case",
+                    "id_strategy": "CUSTOMIZE_STRING",
+                    "properties": ["case_id", "case_code", "title", "area_name", "risk_level", "source_type", "updated_at"],
+                    "nullable_keys": ["area_name", "risk_level", "source_type", "updated_at"]
+                }),
+            )
+            .await;
+
+        let _ = self
+            .post_schema(
+                "vertexlabels",
+                json!({
+                    "name": "kg_entity",
+                    "id_strategy": "CUSTOMIZE_STRING",
+                    "properties": ["case_id", "entity_type", "entity_name", "confidence", "updated_at"],
+                    "nullable_keys": ["confidence", "updated_at"]
+                }),
+            )
+            .await;
+
+        let _ = self
+            .post_schema(
+                "edgelabels",
+                json!({
+                    "name": "case_has_entity",
+                    "source_label": "risk_case",
+                    "target_label": "kg_entity",
+                    "frequency": "SINGLE",
+                    "properties": ["case_id", "relation_type", "confidence", "updated_at"],
+                    "nullable_keys": ["confidence", "updated_at"]
+                }),
+            )
+            .await;
+
+        let _ = self
+            .post_schema(
+                "edgelabels",
+                json!({
+                    "name": "entity_related_to",
+                    "source_label": "kg_entity",
+                    "target_label": "kg_entity",
+                    "frequency": "SINGLE",
+                    "properties": ["case_id", "relation_type", "confidence", "updated_at"],
+                    "nullable_keys": ["confidence", "updated_at"]
+                }),
+            )
+            .await;
+
+        Ok(())
     }
 
     async fn drop_case_graph(&self, input: &GraphCaseSyncInput) -> Result<(), String> {
-        let script = format!(
-            "g.V().has('kg_entity', 'case_id', {case_id}).drop().iterate(); \
-             g.V().has('risk_case', 'vertex_key', {case_key}).drop().iterate();",
-            case_id = quoted(&input.case_id),
-            case_key = quoted(&case_vertex_key(&input.case_id)),
-        );
-        self.run_gremlin(&script).await.map(|_| ())
+        for entity in &input.entities {
+            let _ = self
+                .delete_graph_path("vertices", &entity_vertex_id(&input.case_id, &entity.entity_name))
+                .await;
+        }
+        let _ = self
+            .delete_graph_path("vertices", &case_vertex_id(&input.case_id))
+            .await;
+        Ok(())
     }
 
     async fn create_case_vertex(&self, input: &GraphCaseSyncInput) -> Result<(), String> {
-        let script = format!(
-            "g.addV('risk_case')\
-                .property('vertex_key', {vertex_key})\
-                .property('case_id', {case_id})\
-                .property('case_code', {case_code})\
-                .property('title', {title})\
-                .property('area_name', {area_name})\
-                .property('risk_level', {risk_level})\
-                .property('source_type', {source_type})\
-                .property('updated_at', {updated_at})\
-                .iterate();",
-            vertex_key = quoted(&case_vertex_key(&input.case_id)),
-            case_id = quoted(&input.case_id),
-            case_code = quoted(&input.case_code),
-            title = quoted(&input.title),
-            area_name = quoted(&input.area_name),
-            risk_level = quoted(&input.risk_level),
-            source_type = quoted(&input.source_type),
-            updated_at = quoted(&chrono::Utc::now().to_rfc3339()),
-        );
-        self.run_gremlin(&script).await.map(|_| ())
+        self.post_graph(
+            "vertices",
+            json!({
+                "id": case_vertex_id(&input.case_id),
+                "label": "risk_case",
+                "properties": {
+                    "case_id": input.case_id,
+                    "case_code": input.case_code,
+                    "title": input.title,
+                    "area_name": input.area_name,
+                    "risk_level": input.risk_level,
+                    "source_type": input.source_type,
+                    "updated_at": chrono::Utc::now().to_rfc3339()
+                }
+            }),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn create_entity_vertex(
@@ -182,23 +208,22 @@ schema.edgeLabel('entity_related_to')
         input: &GraphCaseSyncInput,
         entity: &GraphEntitySync,
     ) -> Result<(), String> {
-        let script = format!(
-            "g.addV('kg_entity')\
-                .property('vertex_key', {vertex_key})\
-                .property('case_id', {case_id})\
-                .property('entity_type', {entity_type})\
-                .property('entity_name', {entity_name})\
-                .property('confidence', {confidence})\
-                .property('updated_at', {updated_at})\
-                .iterate();",
-            vertex_key = quoted(&entity_vertex_key(&input.case_id, &entity.entity_name)),
-            case_id = quoted(&input.case_id),
-            entity_type = quoted(&entity.entity_type),
-            entity_name = quoted(&entity.entity_name),
-            confidence = entity.confidence,
-            updated_at = quoted(&chrono::Utc::now().to_rfc3339()),
-        );
-        self.run_gremlin(&script).await.map(|_| ())
+        self.post_graph(
+            "vertices",
+            json!({
+                "id": entity_vertex_id(&input.case_id, &entity.entity_name),
+                "label": "kg_entity",
+                "properties": {
+                    "case_id": input.case_id,
+                    "entity_type": entity.entity_type,
+                    "entity_name": entity.entity_name,
+                    "confidence": entity.confidence,
+                    "updated_at": chrono::Utc::now().to_rfc3339()
+                }
+            }),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn create_case_entity_edge(
@@ -206,22 +231,24 @@ schema.edgeLabel('entity_related_to')
         input: &GraphCaseSyncInput,
         entity: &GraphEntitySync,
     ) -> Result<(), String> {
-        let script = format!(
-            "g.V().has('risk_case', 'vertex_key', {case_key}).as('c')\
-                .V().has('kg_entity', 'vertex_key', {entity_key})\
-                .addE('case_has_entity').from('c')\
-                .property('case_id', {case_id})\
-                .property('relation_type', 'case_has_entity')\
-                .property('confidence', {confidence})\
-                .property('updated_at', {updated_at})\
-                .iterate();",
-            case_key = quoted(&case_vertex_key(&input.case_id)),
-            entity_key = quoted(&entity_vertex_key(&input.case_id, &entity.entity_name)),
-            case_id = quoted(&input.case_id),
-            confidence = entity.confidence,
-            updated_at = quoted(&chrono::Utc::now().to_rfc3339()),
-        );
-        self.run_gremlin(&script).await.map(|_| ())
+        self.post_graph(
+            "edges",
+            json!({
+                "label": "case_has_entity",
+                "outV": case_vertex_id(&input.case_id),
+                "outVLabel": "risk_case",
+                "inV": entity_vertex_id(&input.case_id, &entity.entity_name),
+                "inVLabel": "kg_entity",
+                "properties": {
+                    "case_id": input.case_id,
+                    "relation_type": "case_has_entity",
+                    "confidence": entity.confidence,
+                    "updated_at": chrono::Utc::now().to_rfc3339()
+                }
+            }),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn create_entity_relation_edge(
@@ -229,36 +256,75 @@ schema.edgeLabel('entity_related_to')
         input: &GraphCaseSyncInput,
         relation: &GraphRelationSync,
     ) -> Result<(), String> {
-        let script = format!(
-            "g.V().has('kg_entity', 'vertex_key', {source_key}).as('s')\
-                .V().has('kg_entity', 'vertex_key', {target_key})\
-                .addE('entity_related_to').from('s')\
-                .property('case_id', {case_id})\
-                .property('relation_type', {relation_type})\
-                .property('confidence', {confidence})\
-                .property('updated_at', {updated_at})\
-                .iterate();",
-            source_key = quoted(&entity_vertex_key(&input.case_id, &relation.source_entity_name)),
-            target_key = quoted(&entity_vertex_key(&input.case_id, &relation.target_entity_name)),
-            case_id = quoted(&input.case_id),
-            relation_type = quoted(&relation.relation_type),
-            confidence = relation.confidence,
-            updated_at = quoted(&chrono::Utc::now().to_rfc3339()),
-        );
-        self.run_gremlin(&script).await.map(|_| ())
+        self.post_graph(
+            "edges",
+            json!({
+                "label": "entity_related_to",
+                "outV": entity_vertex_id(&input.case_id, &relation.source_entity_name),
+                "outVLabel": "kg_entity",
+                "inV": entity_vertex_id(&input.case_id, &relation.target_entity_name),
+                "inVLabel": "kg_entity",
+                "properties": {
+                    "case_id": input.case_id,
+                    "relation_type": relation.relation_type,
+                    "confidence": relation.confidence,
+                    "updated_at": chrono::Utc::now().to_rfc3339()
+                }
+            }),
+        )
+        .await
+        .map(|_| ())
     }
 
-    async fn run_gremlin(&self, script: &str) -> Result<Value, String> {
-        let url = format!("{}/gremlin", self.base_url);
-        let request = self
+    async fn post_schema(&self, resource: &str, payload: Value) -> Result<Value, String> {
+        self.request_json(
+            reqwest::Method::POST,
+            &format!("/graphs/hugegraph/schema/{resource}"),
+            Some(payload),
+        )
+        .await
+        .or_else(|error| {
+            if error.contains("existed") || error.contains("already") || error.contains("Conflict") {
+                Ok(json!({ "status": "exists" }))
+            } else {
+                Err(error)
+            }
+        })
+    }
+
+    async fn post_graph(&self, resource: &str, payload: Value) -> Result<Value, String> {
+        self.request_json(
+            reqwest::Method::POST,
+            &format!("/graphs/hugegraph/graph/{resource}"),
+            Some(payload),
+        )
+        .await
+    }
+
+    async fn delete_graph_path(&self, resource: &str, id: &str) -> Result<Value, String> {
+        let encoded_id = urlencoding::encode(id);
+        self.request_json(
+            reqwest::Method::DELETE,
+            &format!("/graphs/hugegraph/graph/{resource}/{encoded_id}"),
+            None,
+        )
+        .await
+    }
+
+    async fn request_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        payload: Option<Value>,
+    ) -> Result<Value, String> {
+        let url = format!("{}{}", self.base_url, path);
+        let mut request = self
             .client
-            .post(url)
-            .basic_auth(self.username.clone(), Some(self.password.clone()))
-            .json(&json!({
-                "gremlin": script,
-                "language": "gremlin-groovy",
-                "bindings": {}
-            }));
+            .request(method, url)
+            .basic_auth(self.username.clone(), Some(self.password.clone()));
+        if let Some(payload) = payload {
+            request = request.json(&payload);
+        }
 
         let response = request.send().await.map_err(|error| error.to_string())?;
         let status = response.status();
@@ -266,21 +332,16 @@ schema.edgeLabel('entity_related_to')
         if !status.is_success() {
             return Err(format!("HugeGraph request failed with status {status}: {body}"));
         }
-
         serde_json::from_str(&body).map_err(|error| format!("invalid HugeGraph response: {error}: {body}"))
     }
 }
 
-fn case_vertex_key(case_id: &str) -> String {
+fn case_vertex_id(case_id: &str) -> String {
     format!("case:{case_id}")
 }
 
-fn entity_vertex_key(case_id: &str, entity_name: &str) -> String {
-    format!(
-        "entity:{}:{}",
-        case_id,
-        sanitize_key(entity_name)
-    )
+fn entity_vertex_id(case_id: &str, entity_name: &str) -> String {
+    format!("entity:{}:{}", case_id, sanitize_key(entity_name))
 }
 
 fn sanitize_key(value: &str) -> String {
@@ -290,6 +351,20 @@ fn sanitize_key(value: &str) -> String {
         .collect()
 }
 
-fn quoted(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_key_replaces_non_ascii_separator() {
+        assert_eq!(sanitize_key("case A/1"), "case_A_1");
+    }
+
+    #[test]
+    fn entity_vertex_key_is_stable() {
+        assert_eq!(
+            entity_vertex_id("case-1", "School Gate"),
+            "entity:case-1:School_Gate"
+        );
+    }
 }

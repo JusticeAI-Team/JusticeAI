@@ -14,6 +14,13 @@ pub struct VectorCaseDocument {
     pub area_name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct VectorSearchQuery {
+    pub embedding: Vec<f32>,
+    pub exclude_case_id: Option<String>,
+    pub limit: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimilarCaseHit {
     pub id: String,
@@ -61,6 +68,7 @@ impl MilvusVectorStore {
     pub async fn upsert_case_vector(
         &self,
         document: &VectorCaseDocument,
+        embedding: &[f32],
     ) -> Result<VectorSyncResult, String> {
         if self.address.trim().is_empty() {
             return Ok(VectorSyncResult {
@@ -70,11 +78,13 @@ impl MilvusVectorStore {
         }
 
         self.ensure_collection().await?;
-
-        let vector = vectorize_text(&format!(
-            "{}\n{}\n{}\n{}\n{}",
-            document.title, document.summary, document.area_name, document.risk_level, document.source_type
-        ), self.dimension);
+        if embedding.len() != self.dimension {
+            return Err(format!(
+                "embedding dimension mismatch: expected {}, got {}",
+                self.dimension,
+                embedding.len()
+            ));
+        }
 
         let payload = json!({
             "collectionName": self.collection_name,
@@ -88,7 +98,7 @@ impl MilvusVectorStore {
                     "risk_level": document.risk_level,
                     "source_type": document.source_type,
                     "area_name": document.area_name,
-                    "embedding": vector
+                    "embedding": embedding
                 }
             ]
         });
@@ -102,50 +112,84 @@ impl MilvusVectorStore {
 
     pub async fn search_similar_cases(
         &self,
-        query_text: &str,
-        exclude_case_id: Option<&str>,
-        limit: usize,
+        query: &VectorSearchQuery,
     ) -> Result<Vec<SimilarCaseHit>, String> {
         if self.address.trim().is_empty() {
             return Ok(Vec::new());
         }
 
         self.ensure_collection().await?;
-        let vector = vectorize_text(query_text, self.dimension);
+        if query.embedding.len() != self.dimension {
+            return Err(format!(
+                "embedding dimension mismatch: expected {}, got {}",
+                self.dimension,
+                query.embedding.len()
+            ));
+        }
         let payload = json!({
             "collectionName": self.collection_name,
-            "data": [vector],
+            "data": [query.embedding],
             "annsField": "embedding",
-            "limit": limit as i64,
+            "limit": query.limit as i64,
             "outputFields": ["id", "case_id", "case_code", "title", "risk_level"]
         });
 
         let response = self.post_json("/v2/vectordb/entities/search", payload).await?;
         let mut hits = parse_search_hits(response);
-        if let Some(exclude_case_id) = exclude_case_id {
+        if let Some(exclude_case_id) = query.exclude_case_id.as_deref() {
             hits.retain(|hit| hit.case_id != exclude_case_id);
         }
-        hits.truncate(limit);
+        hits.truncate(query.limit);
         Ok(hits)
     }
 
     async fn ensure_collection(&self) -> Result<(), String> {
         let payload = json!({
             "collectionName": self.collection_name,
-            "dimension": self.dimension as i64,
-            "metricType": "COSINE",
-            "idType": "VarChar",
-            "autoID": false,
-            "primaryFieldName": "id",
-            "vectorFieldName": "embedding",
-            "enableDynamicField": true
+            "schema": {
+                "autoID": false,
+                "enableDynamicField": true,
+                "fields": [
+                    {
+                        "fieldName": "id",
+                        "dataType": "VarChar",
+                        "isPrimary": true,
+                        "elementTypeParams": {
+                            "max_length": "128"
+                        }
+                    },
+                    {
+                        "fieldName": "embedding",
+                        "dataType": "FloatVector",
+                        "elementTypeParams": {
+                            "dim": self.dimension.to_string()
+                        }
+                    }
+                ]
+            },
+            "indexParams": [
+                {
+                    "fieldName": "embedding",
+                    "metricType": "COSINE",
+                    "indexName": "embedding_idx",
+                    "indexType": "AUTOINDEX"
+                }
+            ]
         });
 
         match self.post_json("/v2/vectordb/collections/create", payload).await {
             Ok(_) => Ok(()),
             Err(error) if error.contains("already exist") || error.contains("already exists") => Ok(()),
             Err(error) => Err(error),
-        }
+        }?;
+
+        let _ = self
+            .post_json(
+                "/v2/vectordb/collections/load",
+                json!({ "collectionName": self.collection_name }),
+            )
+            .await;
+        Ok(())
     }
 
     async fn post_json(&self, path: &str, payload: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -171,35 +215,6 @@ impl MilvusVectorStore {
         }
         Ok(value)
     }
-}
-
-pub fn vectorize_text(text: &str, dimension: usize) -> Vec<f32> {
-    let mut vector = vec![0.0_f32; dimension];
-    for token in tokenize(text) {
-        let mut hash = 2166136261_u32;
-        for byte in token.as_bytes() {
-            hash ^= u32::from(*byte);
-            hash = hash.wrapping_mul(16777619);
-        }
-        let index = (hash as usize) % dimension;
-        vector[index] += 1.0;
-    }
-
-    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for value in &mut vector {
-            *value /= norm;
-        }
-    }
-    vector
-}
-
-fn tokenize(text: &str) -> Vec<String> {
-    text.split(|ch: char| !ch.is_alphanumeric())
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(|token| token.to_ascii_lowercase())
-        .collect()
 }
 
 fn parse_search_hits(value: serde_json::Value) -> Vec<SimilarCaseHit> {
@@ -254,4 +269,51 @@ fn parse_search_hits(value: serde_json::Value) -> Vec<SimilarCaseHit> {
 
 fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
     value.get(key).and_then(serde_json::Value::as_str).map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_search_hits_supports_nested_entity_shape() {
+        let value = serde_json::json!({
+            "code": 0,
+            "data": [[{
+                "id": "doc-1",
+                "distance": 0.88,
+                "entity": {
+                    "case_id": "case-1",
+                    "case_code": "JA-1",
+                    "title": "Nested",
+                    "risk_level": "high"
+                }
+            }]]
+        });
+
+        let hits = parse_search_hits(value);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].case_code, "JA-1");
+        assert_eq!(hits[0].title, "Nested");
+    }
+
+    #[test]
+    fn parse_search_hits_supports_flat_shape() {
+        let value = serde_json::json!({
+            "code": 0,
+            "data": [{
+                "id": "doc-2",
+                "score": 0.73,
+                "case_id": "case-2",
+                "case_code": "JA-2",
+                "title": "Flat",
+                "risk_level": "medium"
+            }]
+        });
+
+        let hits = parse_search_hits(value);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].case_id, "case-2");
+        assert!((hits[0].score - 0.73).abs() < 1e-6);
+    }
 }

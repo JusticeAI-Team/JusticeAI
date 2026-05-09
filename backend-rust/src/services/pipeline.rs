@@ -15,8 +15,9 @@ use crate::{
     app::AppState,
     services::{
         ai::{ExtractionInput, OpenAiCompatibleAiService, RecommendationInput},
+        embedding::OpenAiCompatibleEmbeddingService,
         graph::{GraphCaseSyncInput, GraphEntitySync, GraphRelationSync, HugeGraphSyncService},
-        vector::{MilvusVectorStore, SimilarCaseHit, VectorCaseDocument},
+        vector::{MilvusVectorStore, SimilarCaseHit, VectorCaseDocument, VectorSearchQuery},
     },
     shared::error::AppError,
 };
@@ -49,7 +50,6 @@ pub struct ExtractionResult {
 
 #[derive(Debug, FromRow)]
 struct ImportRow {
-    id: Uuid,
     source_type: String,
 }
 
@@ -105,10 +105,11 @@ pub async fn process_import_batch(
     state: &AppState,
     import_id: Uuid,
     ai_service: &OpenAiCompatibleAiService,
+    embedding_service: &OpenAiCompatibleEmbeddingService,
     vector_store: &MilvusVectorStore,
 ) -> Result<ProcessImportResult, AppError> {
     let import_row = sqlx::query_as::<_, ImportRow>(
-        "SELECT id, source_type FROM imports WHERE id = $1",
+        "SELECT source_type FROM imports WHERE id = $1",
     )
     .bind(import_id)
     .fetch_optional(state.db())
@@ -200,12 +201,19 @@ pub async fn process_import_batch(
 
             let similar_cases = vector_store
                 .search_similar_cases(
-                    &format!(
-                        "{}\n{}\n{}\n{}",
-                        title, area_name, import_row.source_type, risk_level
-                    ),
-                    None,
-                    3,
+                    &VectorSearchQuery {
+                        embedding: embed_for_similarity(
+                            embedding_service,
+                            &format!(
+                                "{}\n{}\n{}\n{}",
+                                title, area_name, import_row.source_type, risk_level
+                            ),
+                        )
+                        .await
+                        .unwrap_or_default(),
+                        exclude_case_id: None,
+                        limit: 3,
+                    },
                 )
                 .await
                 .unwrap_or_default();
@@ -345,7 +353,9 @@ pub async fn process_import_batch(
     tx.commit().await.map_err(|_| AppError::Internal)?;
 
     for document in &vector_documents {
-        let _ = vector_store.upsert_case_vector(document).await;
+        let sync = sync_case_vector(embedding_service, vector_store, document).await;
+        update_case_vector_sync(state.db(), parse_uuid(&document.case_id), &sync.status, &sync.message, Utc::now())
+            .await?;
     }
 
     Ok(ProcessImportResult {
@@ -366,6 +376,7 @@ pub async fn execute_extraction_run(
     case_ids: Option<Vec<Uuid>>,
     mode: Option<String>,
     ai_service: &OpenAiCompatibleAiService,
+    embedding_service: &OpenAiCompatibleEmbeddingService,
     graph_service: &HugeGraphSyncService,
     vector_store: &MilvusVectorStore,
 ) -> Result<ExtractionResult, AppError> {
@@ -456,6 +467,9 @@ pub async fn execute_extraction_run(
     let mut success_count = 0_i32;
     let mut graph_sync_inputs = Vec::new();
     let mut vector_documents = Vec::new();
+    let mut graph_sync_failures = Vec::new();
+    let mut vector_sync_failures = Vec::new();
+    let mut extraction_summaries = Vec::new();
 
     for case in &cases {
         delete_case_graph(&mut tx, case.id).await?;
@@ -471,8 +485,16 @@ pub async fn execute_extraction_run(
         let crate::services::ai::ExtractionOutput {
             entities,
             relations,
+            summary,
+            model_contract,
+            is_placeholder,
             ..
         } = extracted;
+        extraction_summaries.push(if is_placeholder {
+            format!("fallback: {summary}")
+        } else {
+            format!("{} via {}", summary, model_contract.model_name)
+        });
 
         let mut entity_ids = Vec::with_capacity(entities.len());
         let mut graph_entities = Vec::with_capacity(entities.len());
@@ -509,12 +531,19 @@ pub async fn execute_extraction_run(
 
         let similar_cases = vector_store
             .search_similar_cases(
-                &format!(
-                    "{}\n{}\n{}\n{}",
-                    case.title, case.area_name, case.source_type, case.risk_level
-                ),
-                Some(&case.id.to_string()),
-                3,
+                &VectorSearchQuery {
+                    embedding: embed_for_similarity(
+                        embedding_service,
+                        &format!(
+                            "{}\n{}\n{}\n{}",
+                            case.title, case.area_name, case.source_type, case.risk_level
+                        ),
+                    )
+                    .await
+                    .unwrap_or_default(),
+                    exclude_case_id: Some(case.id.to_string()),
+                    limit: 3,
+                },
             )
             .await
             .unwrap_or_default();
@@ -563,15 +592,16 @@ pub async fn execute_extraction_run(
             sqlx::query(
                 r#"
                 INSERT INTO graph_relations (
-                    id, relation_type, source_entity_id, target_entity_id, created_at
+                    id, relation_type, source_entity_id, target_entity_id, confidence, created_at
                 )
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 "#,
             )
             .bind(Uuid::new_v4())
             .bind(&relation_type)
             .bind(entity_ids[relation.source_index])
             .bind(entity_ids[relation.target_index])
+            .bind(relation_confidence)
             .bind(now_at)
             .execute(&mut *tx)
             .await
@@ -611,8 +641,11 @@ pub async fn execute_extraction_run(
 
     let failure_count = cases.len() as i32 - success_count;
     let summary = format!(
-        "processed {} cases, created {} entities and {} relations via placeholder extraction service",
-        success_count, created_entity_count, created_relation_count
+        "processed {} cases, created {} entities and {} relations. {}",
+        success_count,
+        created_entity_count,
+        created_relation_count,
+        extraction_summaries.join(" || ")
     );
 
     sqlx::query(
@@ -664,11 +697,40 @@ pub async fn execute_extraction_run(
     tx.commit().await.map_err(|_| AppError::Internal)?;
 
     for input in &graph_sync_inputs {
-        let _ = graph_service.sync_case_graph(input).await;
+        match graph_service.sync_case_graph(input).await {
+            Ok(result) => {
+                let case_id = parse_uuid(&input.case_id);
+                let sync_message = format!(
+                    "{} (vertices={}, edges={})",
+                    result.message, result.vertex_count, result.edge_count
+                );
+                update_case_graph_sync(state.db(), case_id, &result.status, &sync_message, Utc::now()).await?;
+            }
+            Err(error) => {
+                let case_id = parse_uuid(&input.case_id);
+                update_case_graph_sync(state.db(), case_id, "failed", &error, Utc::now()).await?;
+                graph_sync_failures.push(error);
+            }
+        }
     }
     for document in &vector_documents {
-        let _ = vector_store.upsert_case_vector(document).await;
+        let sync = sync_case_vector(embedding_service, vector_store, document).await;
+        let case_id = parse_uuid(&document.case_id);
+        update_case_vector_sync(state.db(), case_id, &sync.status, &sync.message, Utc::now()).await?;
+        if sync.status != "indexed" {
+            vector_sync_failures.push(sync.message);
+        }
     }
+
+    update_extraction_run_sync_status(
+        state.db(),
+        run_id,
+        if graph_sync_failures.is_empty() { "synced" } else { "failed" },
+        &join_messages(&graph_sync_failures),
+        if vector_sync_failures.is_empty() { "indexed" } else { "failed" },
+        &join_messages(&vector_sync_failures),
+    )
+    .await?;
 
     Ok(ExtractionResult {
         run_id,
@@ -1266,4 +1328,147 @@ fn format_reference_cases(hits: &[SimilarCaseHit]) -> Vec<String> {
             )
         })
         .collect()
+}
+
+async fn sync_case_vector(
+    embedding_service: &OpenAiCompatibleEmbeddingService,
+    vector_store: &MilvusVectorStore,
+    document: &VectorCaseDocument,
+) -> crate::services::vector::VectorSyncResult {
+    let embedding = match embedding_service
+        .embed_text(&format!(
+            "{}\n{}\n{}\n{}\n{}",
+            document.title, document.summary, document.area_name, document.risk_level, document.source_type
+        ))
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::services::vector::VectorSyncResult {
+                status: "failed".to_string(),
+                message: format!("embedding generation failed: {error}"),
+            }
+        }
+    };
+
+    match vector_store.upsert_case_vector(document, &embedding).await {
+        Ok(result) => result,
+        Err(error) => crate::services::vector::VectorSyncResult {
+            status: "failed".to_string(),
+            message: format!("milvus upsert failed: {error}"),
+        },
+    }
+}
+
+async fn embed_for_similarity(
+    embedding_service: &OpenAiCompatibleEmbeddingService,
+    text: &str,
+) -> Result<Vec<f32>, String> {
+    embedding_service.embed_text(text).await
+}
+
+async fn update_case_graph_sync(
+    db: &sqlx::PgPool,
+    case_id: Uuid,
+    status: &str,
+    message: &str,
+    synced_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE risk_cases
+        SET graph_sync_status = $2,
+            graph_sync_message = $3,
+            graph_synced_at = $4,
+            updated_at = $4
+        WHERE id = $1
+        "#,
+    )
+    .bind(case_id)
+    .bind(status)
+    .bind(truncate_message(message))
+    .bind(synced_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+async fn update_case_vector_sync(
+    db: &sqlx::PgPool,
+    case_id: Uuid,
+    status: &str,
+    message: &str,
+    synced_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE risk_cases
+        SET vector_sync_status = $2,
+            vector_sync_message = $3,
+            vector_synced_at = $4,
+            updated_at = $4
+        WHERE id = $1
+        "#,
+    )
+    .bind(case_id)
+    .bind(status)
+    .bind(truncate_message(message))
+    .bind(synced_at)
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+async fn update_extraction_run_sync_status(
+    db: &sqlx::PgPool,
+    run_id: Uuid,
+    graph_status: &str,
+    graph_message: &str,
+    vector_status: &str,
+    vector_message: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE extraction_runs
+        SET graph_sync_status = $2,
+            graph_sync_message = $3,
+            vector_sync_status = $4,
+            vector_sync_message = $5,
+            updated_at = $6
+        WHERE id = $1
+        "#,
+    )
+    .bind(run_id)
+    .bind(graph_status)
+    .bind(truncate_message(graph_message))
+    .bind(vector_status)
+    .bind(truncate_message(vector_message))
+    .bind(Utc::now())
+    .execute(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+fn join_messages(messages: &[String]) -> String {
+    if messages.is_empty() {
+        String::new()
+    } else {
+        messages.join(" | ")
+    }
+}
+
+fn truncate_message(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.len() <= 1000 {
+        trimmed.to_string()
+    } else {
+        trimmed[..1000].to_string()
+    }
+}
+
+fn parse_uuid(value: &str) -> Uuid {
+    Uuid::parse_str(value).unwrap_or_else(|_| Uuid::nil())
 }

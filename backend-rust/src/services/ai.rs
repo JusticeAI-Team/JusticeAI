@@ -690,3 +690,31 @@ fn fallback_report(input: &ReportInput, contract: ModelContract) -> ReportOutput
         model_contract: fallback_contract,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_json_block_reads_fenced_json() {
+        let text = "```json\n{\"ok\":true}\n```";
+        let json = extract_json_block(text).unwrap();
+        assert_eq!(json, "{\"ok\":true}");
+    }
+
+    #[test]
+    fn extract_json_block_reads_inline_json() {
+        let text = "prefix {\"name\":\"justiceai\"} suffix";
+        let json = extract_json_block(text).unwrap();
+        assert_eq!(json, "{\"name\":\"justiceai\"}");
+    }
+
+    #[test]
+    fn normalize_chat_content_handles_array_shape() {
+        let value = serde_json::json!([
+            { "text": "hello" },
+            { "text": " world" }
+        ]);
+        assert_eq!(normalize_chat_content(value), "hello world");
+    }
+}

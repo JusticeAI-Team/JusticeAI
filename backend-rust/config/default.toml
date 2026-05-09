@@ -26,6 +26,12 @@ base_url = "http://vllm:8000/v1"
 model_name = "Qwen2.5-32B-Instruct-AWQ"
 api_key = ""
 
+[embedding]
+base_url = "http://vllm:8000/v1"
+model_name = ""
+api_key = ""
+endpoint = "/embeddings"
+
 [storage]
 upload_dir = "./runtime/uploads"
 report_dir = "./runtime/reports"
