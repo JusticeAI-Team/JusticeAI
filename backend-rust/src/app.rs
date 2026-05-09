@@ -24,6 +24,8 @@ pub struct Settings {
     pub hugegraph: HugeGraphConfig,
     pub milvus: MilvusConfig,
     pub vllm: VllmConfig,
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
     pub storage: StorageConfig,
 }
 
@@ -78,11 +80,27 @@ pub struct VllmConfig {
     pub api_key: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct EmbeddingConfig {
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model_name: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_embedding_endpoint")]
+    pub endpoint: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct StorageConfig {
     pub upload_dir: String,
     pub report_dir: String,
     pub training_dir: String,
+}
+
+fn default_embedding_endpoint() -> String {
+    "/embeddings".to_string()
 }
 
 #[derive(Clone)]

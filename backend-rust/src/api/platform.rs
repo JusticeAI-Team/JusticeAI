@@ -17,6 +17,7 @@ use crate::{
             ModelContract as AiModelContract, OpenAiCompatibleAiService, RecommendationInput,
             ReportInput,
         },
+        embedding::{EmbeddingContract, OpenAiCompatibleEmbeddingService},
         graph::HugeGraphSyncService,
         pipeline::{execute_extraction_run, process_import_batch},
         vector::{MilvusVectorStore, SimilarCaseHit},
@@ -280,6 +281,10 @@ struct SaveIntegrationsSettingsRequest {
     model_chat_endpoint: Option<String>,
     model_json_mode_supported: Option<bool>,
     openai_api_key: Option<String>,
+    embedding_base_url: Option<String>,
+    embedding_model: Option<String>,
+    embedding_api_key: Option<String>,
+    embedding_endpoint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,6 +295,8 @@ struct TestIntegrationsRequest {
     model_base_url: Option<String>,
     model_name: Option<String>,
     openai_api_key: Option<String>,
+    embedding_base_url: Option<String>,
+    embedding_model: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -488,6 +495,10 @@ struct ExtractionRunDto {
     summary: Option<String>,
     provider_style: String,
     model_name: Option<String>,
+    graph_sync_status: String,
+    graph_sync_message: String,
+    vector_sync_status: String,
+    vector_sync_message: String,
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -600,6 +611,12 @@ struct RiskCaseListItem {
     risk_tags: String,
     risk_reason_summary: String,
     disposal_advice: String,
+    graph_sync_status: String,
+    graph_sync_message: String,
+    graph_synced_at: Option<DateTime<Utc>>,
+    vector_sync_status: String,
+    vector_sync_message: String,
+    vector_synced_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -654,6 +671,12 @@ struct RiskCaseView {
     risk_tags: Vec<String>,
     risk_reason_summary: String,
     disposal_advice: Vec<String>,
+    graph_sync_status: String,
+    graph_sync_message: String,
+    graph_synced_at: Option<String>,
+    vector_sync_status: String,
+    vector_sync_message: String,
+    vector_synced_at: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -894,6 +917,7 @@ struct PlatformSettingsResponse {
     integrations: Vec<IntegrationStatusItem>,
     storage: HashMap<String, String>,
     model_contract: AiModelContract,
+    embedding_contract: EmbeddingContract,
     is_placeholder: bool,
 }
 
@@ -930,6 +954,7 @@ struct IntegrationSettingsResponse {
     hugegraph: IntegrationStatus,
     milvus: IntegrationStatus,
     model_service: ModelIntegrationStatus,
+    embedding_service: ModelIntegrationStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -939,6 +964,7 @@ struct IntegrationTestResponse {
     hugegraph: IntegrationStatus,
     milvus: IntegrationStatus,
     model_service: ModelIntegrationStatus,
+    embedding_service: ModelIntegrationStatus,
 }
 
 async fn dashboard_overview(
@@ -1258,15 +1284,24 @@ async fn process_ingestion_action_live(
 ) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
     let integration_values = load_setting_map(state.db(), "integrations").await?;
     let ai_service = build_ai_service(&state, &integration_values);
+    let embedding_service = build_embedding_service(&state, &integration_values);
     let vector_store = build_vector_store(&state, &integration_values);
-    let result = process_import_batch(&state, id, &ai_service, &vector_store).await?;
+    let result = process_import_batch(&state, id, &ai_service, &embedding_service, &vector_store).await?;
 
     Ok(ok(ActionResponse {
         id: result.import_id.to_string(),
         status: result.status,
         message: format!(
-            "processed {} records into {} cases with {} failed records",
-            result.total_record_count, result.affected_case_count, result.failed_record_count
+            "processed {} / {} records into {} cases, failed {}, workflow_run={}, mapping_template={}",
+            result.processed_record_count,
+            result.total_record_count,
+            result.affected_case_count,
+            result.failed_record_count,
+            result.workflow_run_id,
+            result
+                .mapping_template_id
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string())
         ),
         updated_at: result.finished_at.to_rfc3339(),
         is_placeholder: false,
@@ -1648,7 +1683,8 @@ async fn extraction_runs(
     let items = sqlx::query_as::<_, ExtractionRunDto>(
         r#"
         SELECT id, scope_type, mode, status, item_count, success_count, failure_count, summary,
-               provider_style, model_name, started_at, finished_at, created_at, updated_at
+               provider_style, model_name, graph_sync_status, graph_sync_message,
+               vector_sync_status, vector_sync_message, started_at, finished_at, created_at, updated_at
         FROM extraction_runs
         WHERE ($1::TEXT IS NULL OR status = $1)
         ORDER BY started_at DESC, id DESC
@@ -1678,7 +1714,8 @@ async fn extraction_run_detail(
     let item = sqlx::query_as::<_, ExtractionRunDto>(
         r#"
         SELECT id, scope_type, mode, status, item_count, success_count, failure_count, summary,
-               provider_style, model_name, started_at, finished_at, created_at, updated_at
+               provider_style, model_name, graph_sync_status, graph_sync_message,
+               vector_sync_status, vector_sync_message, started_at, finished_at, created_at, updated_at
         FROM extraction_runs
         WHERE id = $1
         "#,
@@ -1698,6 +1735,7 @@ async fn create_extraction_run_live(
 ) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
     let integration_values = load_setting_map(state.db(), "integrations").await?;
     let ai_service = build_ai_service(&state, &integration_values);
+    let embedding_service = build_embedding_service(&state, &integration_values);
     let graph_service = build_hugegraph_service(&state, &integration_values);
     let vector_store = build_vector_store(&state, &integration_values);
     let result = execute_extraction_run(
@@ -1705,6 +1743,7 @@ async fn create_extraction_run_live(
         payload.case_ids,
         payload.mode,
         &ai_service,
+        &embedding_service,
         &graph_service,
         &vector_store,
     )
@@ -1714,8 +1753,13 @@ async fn create_extraction_run_live(
         id: result.run_id.to_string(),
         status: result.status,
         message: format!(
-            "processed {} cases, created {} entities and {} relations",
-            result.item_count, result.created_entity_count, result.created_relation_count
+            "processed {} cases (success {}, failed {}), created {} entities and {} relations. {}",
+            result.item_count,
+            result.success_count,
+            result.failure_count,
+            result.created_entity_count,
+            result.created_relation_count,
+            result.summary
         ),
         updated_at: result.finished_at.to_rfc3339(),
         is_placeholder: false,
@@ -1946,6 +1990,8 @@ async fn risk_case_list(
         SELECT id, case_code, title, source_type, area_name, risk_level, risk_score,
                status, alert_status, assignee, occurred_at, due_at, closed_at,
                report_period, review_status, risk_tags, risk_reason_summary, disposal_advice,
+               graph_sync_status, graph_sync_message, graph_synced_at,
+               vector_sync_status, vector_sync_message, vector_synced_at,
                created_at, updated_at
         FROM risk_cases
         WHERE ($1::TEXT IS NULL OR status = $1)
@@ -1984,6 +2030,8 @@ async fn risk_case_detail_view(
         SELECT id, case_code, title, source_type, area_name, risk_level, risk_score,
                status, alert_status, assignee, occurred_at, due_at, closed_at,
                report_period, review_status, risk_tags, risk_reason_summary, disposal_advice,
+               graph_sync_status, graph_sync_message, graph_synced_at,
+               vector_sync_status, vector_sync_message, vector_synced_at,
                created_at, updated_at
         FROM risk_cases
         WHERE id = $1
@@ -2067,19 +2115,25 @@ async fn risk_case_detail_view(
 
     let integration_values = load_setting_map(state.db(), "integrations").await?;
     let ai_service = build_ai_service(&state, &integration_values);
+    let embedding_service = build_embedding_service(&state, &integration_values);
     let vector_store = build_vector_store(&state, &integration_values);
     let similar_cases = vector_store
         .search_similar_cases(
-            &format!(
-                "{}\n{}\n{}\n{}\n{}",
-                case_info.title,
-                case_info.area_name,
-                case_info.risk_reason_summary,
-                case_info.risk_level,
-                case_info.source_type
-            ),
-            Some(&case_info.id.to_string()),
-            5,
+            &crate::services::vector::VectorSearchQuery {
+                embedding: embedding_service
+                    .embed_text(&format!(
+                        "{}\n{}\n{}\n{}\n{}",
+                        case_info.title,
+                        case_info.area_name,
+                        case_info.risk_reason_summary,
+                        case_info.risk_level,
+                        case_info.source_type
+                    ))
+                    .await
+                    .unwrap_or_default(),
+                exclude_case_id: Some(case_info.id.to_string()),
+                limit: 5,
+            },
         )
         .await
         .unwrap_or_default();
@@ -2128,6 +2182,12 @@ async fn risk_case_detail_view(
             risk_tags: split_csv_values(&case_info.risk_tags),
             risk_reason_summary: reason_summary.clone(),
             disposal_advice: disposal_advice.clone(),
+            graph_sync_status: case_info.graph_sync_status,
+            graph_sync_message: case_info.graph_sync_message,
+            graph_synced_at: case_info.graph_synced_at.map(|value| value.to_rfc3339()),
+            vector_sync_status: case_info.vector_sync_status,
+            vector_sync_message: case_info.vector_sync_message,
+            vector_synced_at: case_info.vector_synced_at.map(|value| value.to_rfc3339()),
             created_at: case_info.created_at.to_rfc3339(),
             updated_at: case_info.updated_at.to_rfc3339(),
         },
@@ -2799,19 +2859,21 @@ async fn create_report_live(
     let file_path = format!("{}/{}-{}.md", report_dir, report_type, period.replace('/', "-"));
     std::fs::write(&file_path, report.content).map_err(|_| AppError::Internal)?;
 
+    let report_status = if report.is_placeholder { "draft" } else { "ready" };
     sqlx::query(
         r#"
         INSERT INTO generated_reports (
             id, title, report_type, period, status, file_path, generated_at, created_at,
             summary, provider_style, model_name
         )
-        VALUES ($1, $2, $3, $4, 'ready', $5, $6, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9, $10)
         "#,
     )
     .bind(report_id)
     .bind(&title)
     .bind(report_type)
     .bind(period)
+    .bind(report_status)
     .bind(&file_path)
     .bind(now_at)
     .bind(&report.summary)
@@ -2931,6 +2993,10 @@ async fn save_integrations_settings(
     upsert_setting(state.db(), "integrations", "model_name", payload.model_name.as_deref(), now_at).await?;
     upsert_setting(state.db(), "integrations", "model_request_style", payload.model_request_style.as_deref(), now_at).await?;
     upsert_setting(state.db(), "integrations", "model_chat_endpoint", payload.model_chat_endpoint.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "embedding_base_url", payload.embedding_base_url.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "embedding_model", payload.embedding_model.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "embedding_api_key", payload.embedding_api_key.as_deref(), now_at).await?;
+    upsert_setting(state.db(), "integrations", "embedding_endpoint", payload.embedding_endpoint.as_deref(), now_at).await?;
 
     if let Some(json_mode_supported) = payload.model_json_mode_supported {
         upsert_setting(
@@ -2968,6 +3034,12 @@ async fn test_integrations_view(
     let model_name = payload
         .model_name
         .unwrap_or_else(|| values.get("model_name").cloned().unwrap_or_else(|| state.settings().vllm.model_name.clone()));
+    let embedding_base = payload
+        .embedding_base_url
+        .unwrap_or_else(|| values.get("embedding_base_url").cloned().unwrap_or_else(|| state.settings().embedding.base_url.clone()));
+    let embedding_model = payload
+        .embedding_model
+        .unwrap_or_else(|| values.get("embedding_model").cloned().unwrap_or_else(|| state.settings().embedding.model_name.clone()));
     let api_key_configured = payload
         .openai_api_key
         .as_deref()
@@ -3009,6 +3081,35 @@ async fn test_integrations_view(
                 .cloned()
                 .unwrap_or_else(|| "/v1/chat/completions".to_string()),
             json_mode_supported: bool_setting(&values, "model_json_mode_supported", true),
+        },
+        embedding_service: ModelIntegrationStatus {
+            key: "embedding_service".to_string(),
+            endpoint: embedding_base.clone(),
+            status: endpoint_status(
+                &state,
+                &format!(
+                    "{}{}",
+                    embedding_base.trim_end_matches('/'),
+                    values
+                        .get("embedding_endpoint")
+                        .cloned()
+                        .unwrap_or_else(|| "/embeddings".to_string())
+                ),
+            )
+            .await,
+            configured: !embedding_model.trim().is_empty(),
+            message: "OpenAI-compatible embedding probe".to_string(),
+            request_style: "openai_embeddings_compatible".to_string(),
+            model: embedding_model,
+            api_key_configured: values
+                .get("embedding_api_key")
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| !state.settings().embedding.api_key.trim().is_empty()),
+            chat_endpoint: values
+                .get("embedding_endpoint")
+                .cloned()
+                .unwrap_or_else(|| "/embeddings".to_string()),
+            json_mode_supported: false,
         },
     }))
 }
@@ -3459,6 +3560,58 @@ fn build_ai_service(state: &AppState, values: &HashMap<String, String>) -> OpenA
     )
 }
 
+fn build_embedding_service(
+    state: &AppState,
+    values: &HashMap<String, String>,
+) -> OpenAiCompatibleEmbeddingService {
+    OpenAiCompatibleEmbeddingService::new(
+        state.http_client().clone(),
+        values
+            .get("embedding_base_url")
+            .cloned()
+            .or_else(|| {
+                if !state.settings().embedding.base_url.trim().is_empty() {
+                    Some(state.settings().embedding.base_url.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| state.settings().vllm.base_url.clone()),
+        values
+            .get("embedding_endpoint")
+            .cloned()
+            .or_else(|| {
+                if !state.settings().embedding.endpoint.trim().is_empty() {
+                    Some(state.settings().embedding.endpoint.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "/embeddings".to_string()),
+        values
+            .get("embedding_model")
+            .cloned()
+            .or_else(|| {
+                if !state.settings().embedding.model_name.trim().is_empty() {
+                    Some(state.settings().embedding.model_name.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default(),
+        values
+            .get("embedding_api_key")
+            .cloned()
+            .or_else(|| {
+                if !state.settings().embedding.api_key.trim().is_empty() {
+                    Some(state.settings().embedding.api_key.clone())
+                } else {
+                    None
+                }
+            }),
+    )
+}
+
 fn build_hugegraph_service(
     state: &AppState,
     values: &HashMap<String, String>,
@@ -3513,7 +3666,7 @@ fn build_vector_store(
             .get("milvus_collection")
             .cloned()
             .unwrap_or_else(|| "justiceai_cases".to_string()),
-        256,
+        512,
     )
 }
 
@@ -3523,7 +3676,9 @@ fn build_platform_settings_response(
     integration_values: &HashMap<String, String>,
 ) -> PlatformSettingsResponse {
     let ai_service = build_ai_service(state, integration_values);
+    let embedding_service = build_embedding_service(state, integration_values);
     let configured_contract = ai_service.configured_contract();
+    let embedding_contract = embedding_service.contract();
     let settings = state.settings();
 
     PlatformSettingsResponse {
@@ -3614,6 +3769,7 @@ fn build_platform_settings_response(
             ),
         ]),
         model_contract: configured_contract.clone(),
+        embedding_contract,
         is_placeholder: configured_contract.is_placeholder,
     }
 }
@@ -3634,6 +3790,17 @@ async fn build_integration_settings_response(
         .get("model_base_url")
         .cloned()
         .unwrap_or_else(|| state.settings().vllm.base_url.clone());
+    let embedding_endpoint = values
+        .get("embedding_base_url")
+        .cloned()
+        .or_else(|| {
+            if !state.settings().embedding.base_url.trim().is_empty() {
+                Some(state.settings().embedding.base_url.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| model_endpoint.clone());
 
     IntegrationSettingsResponse {
         generated_at: now(),
@@ -3678,6 +3845,71 @@ async fn build_integration_settings_response(
                 .cloned()
                 .unwrap_or_else(|| "/v1/chat/completions".to_string()),
             json_mode_supported: bool_setting(values, "model_json_mode_supported", true),
+        },
+        embedding_service: ModelIntegrationStatus {
+            key: "embedding_service".to_string(),
+            endpoint: embedding_endpoint.clone(),
+            status: endpoint_status(
+                state,
+                &format!(
+                    "{}{}",
+                    embedding_endpoint.trim_end_matches('/'),
+                    values
+                        .get("embedding_endpoint")
+                        .cloned()
+                        .or_else(|| {
+                            if !state.settings().embedding.endpoint.trim().is_empty() {
+                                Some(state.settings().embedding.endpoint.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| "/embeddings".to_string())
+                ),
+            )
+            .await,
+            configured: !values
+                .get("embedding_model")
+                .cloned()
+                .or_else(|| {
+                    if !state.settings().embedding.model_name.trim().is_empty() {
+                        Some(state.settings().embedding.model_name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+            message: "OpenAI-compatible embeddings endpoint is configured for vector indexing".to_string(),
+            request_style: "openai_embeddings_compatible".to_string(),
+            model: values
+                .get("embedding_model")
+                .cloned()
+                .or_else(|| {
+                    if !state.settings().embedding.model_name.trim().is_empty() {
+                        Some(state.settings().embedding.model_name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default(),
+            api_key_configured: values
+                .get("embedding_api_key")
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| !state.settings().embedding.api_key.trim().is_empty()),
+            chat_endpoint: values
+                .get("embedding_endpoint")
+                .cloned()
+                .or_else(|| {
+                    if !state.settings().embedding.endpoint.trim().is_empty() {
+                        Some(state.settings().embedding.endpoint.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "/embeddings".to_string()),
+            json_mode_supported: false,
         },
     }
 }

@@ -236,17 +236,30 @@ ALTER TABLE risk_cases
     ADD COLUMN IF NOT EXISTS risk_reason_summary TEXT,
     ADD COLUMN IF NOT EXISTS disposal_advice TEXT,
     ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'pending',
-    ADD COLUMN IF NOT EXISTS risk_tags TEXT NOT NULL DEFAULT '';
+    ADD COLUMN IF NOT EXISTS risk_tags TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS graph_sync_status TEXT NOT NULL DEFAULT 'pending',
+    ADD COLUMN IF NOT EXISTS graph_sync_message TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS graph_synced_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS vector_sync_status TEXT NOT NULL DEFAULT 'pending',
+    ADD COLUMN IF NOT EXISTS vector_sync_message TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS vector_synced_at TIMESTAMPTZ;
 
 ALTER TABLE extraction_runs
     ADD COLUMN IF NOT EXISTS provider_style TEXT NOT NULL DEFAULT 'openai_chat_completion_compatible',
-    ADD COLUMN IF NOT EXISTS model_name TEXT;
+    ADD COLUMN IF NOT EXISTS model_name TEXT,
+    ADD COLUMN IF NOT EXISTS graph_sync_status TEXT NOT NULL DEFAULT 'pending',
+    ADD COLUMN IF NOT EXISTS graph_sync_message TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS vector_sync_status TEXT NOT NULL DEFAULT 'pending',
+    ADD COLUMN IF NOT EXISTS vector_sync_message TEXT NOT NULL DEFAULT '';
 
 ALTER TABLE alerts
     ADD COLUMN IF NOT EXISTS handled_at TIMESTAMPTZ;
 
 ALTER TABLE dispatch_tasks
     ADD COLUMN IF NOT EXISTS feedback_result TEXT;
+
+ALTER TABLE graph_relations
+    ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0;
 
 ALTER TABLE mapping_templates
     ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT FALSE;
@@ -269,9 +282,18 @@ UPDATE risk_cases SET
     risk_reason_summary = COALESCE(risk_reason_summary, ''),
     disposal_advice = COALESCE(disposal_advice, ''),
     review_status = COALESCE(review_status, 'pending'),
-    risk_tags = COALESCE(risk_tags, '');
+    risk_tags = COALESCE(risk_tags, ''),
+    graph_sync_status = COALESCE(graph_sync_status, 'pending'),
+    graph_sync_message = COALESCE(graph_sync_message, ''),
+    vector_sync_status = COALESCE(vector_sync_status, 'pending'),
+    vector_sync_message = COALESCE(vector_sync_message, '');
 UPDATE extraction_runs SET
     provider_style = COALESCE(provider_style, 'openai_chat_completion_compatible'),
-    model_name = COALESCE(model_name, '');
+    model_name = COALESCE(model_name, ''),
+    graph_sync_status = COALESCE(graph_sync_status, 'pending'),
+    graph_sync_message = COALESCE(graph_sync_message, ''),
+    vector_sync_status = COALESCE(vector_sync_status, 'pending'),
+    vector_sync_message = COALESCE(vector_sync_message, '');
+UPDATE graph_relations SET confidence = COALESCE(confidence, 1.0);
 UPDATE mapping_templates SET is_active = COALESCE(is_active, FALSE);
 UPDATE mapping_fields SET required = COALESCE(required, FALSE);

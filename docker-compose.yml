@@ -42,8 +42,15 @@ services:
       HUGEGRAPH__USERNAME: admin
       HUGEGRAPH__PASSWORD: admin
       MILVUS__ADDRESS: http://host.docker.internal:19530
+      MILVUS__USERNAME: root
+      MILVUS__PASSWORD: Milvus
+      MILVUS__TOKEN: root:Milvus
       VLLM__BASE_URL: http://host.docker.internal:8000/v1
-      VLLM__MODEL_NAME: Qwen2.5-32B-Instruct-AWQ
+      VLLM__MODEL_NAME: Qwen2.5-Coder-7B-Instruct
+      EMBEDDING__BASE_URL: http://host.docker.internal:7997/v1
+      EMBEDDING__MODEL_NAME: BAAI/bge-small-zh-v1.5
+      EMBEDDING__API_KEY: ""
+      EMBEDDING__ENDPOINT: /embeddings
       STORAGE__UPLOAD_DIR: /data/uploads
       STORAGE__REPORT_DIR: /data/reports
       STORAGE__TRAINING_DIR: /data/training
