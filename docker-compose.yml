@@ -73,3 +73,23 @@ services:
       - backend
     ports:
       - "18100:80"
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: justiceai-milvus
+    profiles:
+      - vector
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      ETCD_CONFIG_PATH: /milvus/configs/embedEtcd.yaml
+      COMMON_STORAGETYPE: local
+      DEPLOY_MODE: STANDALONE
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - ./docker-data/milvus:/var/lib/milvus
+      - ./local-services/milvus/embedEtcd.yaml:/milvus/configs/embedEtcd.yaml:ro
+      - ./local-services/milvus/user.yaml:/milvus/configs/user.yaml:ro

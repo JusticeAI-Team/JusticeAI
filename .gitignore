@@ -4,3 +4,5 @@
 !.env.example
 !**/.env.example
 docker-data/
+.analysis/
+/通州检察院最新26年4月8日返回信息-示例数据.xlsx
