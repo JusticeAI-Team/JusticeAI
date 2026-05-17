@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     services::appeal_service::{
-        self, AppealRiskCaseLinkRow, ConvertRiskCaseInput, LinkRiskCaseInput,
+        self, clean_display_text, AppealRiskCaseLinkRow, ConvertRiskCaseInput, LinkRiskCaseInput,
     },
     services::appeal_standardization_service,
     shared::error::AppError,
@@ -43,7 +43,8 @@ pub async fn convert_to_risk_case(
     let location = appeal_service::maybe_location(db, appeal_id).await?;
     let now = Utc::now();
     let risk_case_id = Uuid::new_v4();
-    let standardization = appeal_standardization_service::latest_standardization(db, appeal_id).await?;
+    let standardization =
+        appeal_standardization_service::latest_standardization(db, appeal_id).await?;
     let mapping = standardization
         .as_ref()
         .map(|item| item.risk_case_mapping.clone())
@@ -75,7 +76,13 @@ pub async fn convert_to_risk_case(
                         .collect::<Vec<_>>()
                 })
                 .filter(|items| !items.is_empty())
-                .unwrap_or_else(|| vec!["欠薪".to_string(), "农民工".to_string(), "工程建设".to_string()])
+                .unwrap_or_else(|| {
+                    vec![
+                        "欠薪".to_string(),
+                        "农民工".to_string(),
+                        "工程建设".to_string(),
+                    ]
+                })
         })
         .join(",");
     let area_name = location
@@ -89,6 +96,7 @@ pub async fn convert_to_risk_case(
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "北京市XX区".to_string());
+    let area_name = clean_display_text(&area_name, "北京市XX区");
     let title = mapping
         .get("title")
         .and_then(serde_json::Value::as_str)
@@ -98,9 +106,13 @@ pub async fn convert_to_risk_case(
             if appeal.project_name.trim().is_empty() {
                 format!("{}欠薪诉求", area_name)
             } else {
-                format!("{}欠薪诉求", appeal.project_name)
+                format!(
+                    "{}欠薪诉求",
+                    clean_display_text(&appeal.project_name, "北京市XX区XX地点附近项目")
+                )
             }
         });
+    let title = clean_display_text(&title, "北京市XX区欠薪诉求");
     let summary = mapping
         .get("risk_reason_summary")
         .and_then(serde_json::Value::as_str)
@@ -109,9 +121,14 @@ pub async fn convert_to_risk_case(
         .unwrap_or_else(|| {
             format!(
                 "由移动端欠薪诉求 {} 转入。原始描述：{}",
-                appeal.appeal_code, appeal.oral_description
+                appeal.appeal_code,
+                clean_display_text(
+                    &appeal.oral_description,
+                    "申请人反映存在欠薪问题，需进一步核实。"
+                )
             )
         });
+    let summary = clean_display_text(&summary, "移动端欠薪诉求转入风险案件，需进一步核实。");
     let disposal_advice = mapping
         .get("disposal_advice")
         .and_then(serde_json::Value::as_str)
@@ -237,7 +254,8 @@ pub async fn convert_to_risk_case(
         .map_err(|_| AppError::Internal)?;
     }
 
-    let triggered_jobs = create_downstream_jobs_tx(&mut tx, appeal_id, risk_case_id, staff_id, now).await?;
+    let triggered_jobs =
+        create_downstream_jobs_tx(&mut tx, appeal_id, risk_case_id, staff_id, now).await?;
 
     tx.commit().await.map_err(|_| AppError::Internal)?;
     Ok(ConversionResult {
@@ -416,7 +434,8 @@ async fn create_initial_case_graph_tx(
 }
 
 fn entity_id(ids: &HashMap<String, Uuid>, entity_type: &str, entity_name: &str) -> Option<Uuid> {
-    ids.get(&format!("{entity_type}:{}", entity_name.trim())).copied()
+    ids.get(&format!("{entity_type}:{}", entity_name.trim()))
+        .copied()
 }
 
 async fn insert_relation_if_present(

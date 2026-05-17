@@ -12,6 +12,14 @@ use crate::{
 };
 
 pub const DEV_APPLICANT_ID: Uuid = Uuid::from_u128(0x11111111111111111111111111111111);
+const DEFAULT_ORAL_DESCRIPTION: &str =
+    "申请人反映在北京市某项目务工期间存在欠薪问题，具体金额、用工主体和证据材料仍需进一步补充核实。";
+const DEFAULT_PROJECT_NAME: &str = "北京市XX区XX地点附近项目";
+const DEFAULT_EMPLOYER_NAME: &str = "待核实用工主体";
+const DEFAULT_CONTRACTOR_NAME: &str = "待核实现场负责人";
+const DEFAULT_DEMAND_TEXT: &str = "希望协助核实欠薪情况并依法处理。";
+const DEFAULT_ADDRESS_TEXT: &str = "北京市XX区XX地点附近";
+const DEFAULT_AREA_NAME: &str = "北京市XX区";
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct ApplicantProfile {
@@ -208,7 +216,10 @@ pub struct ResolveInput {
     pub notify_applicant: Option<bool>,
 }
 
-pub async fn ensure_dev_applicant(db: &PgPool, applicant_id: Uuid) -> Result<ApplicantProfile, AppError> {
+pub async fn ensure_dev_applicant(
+    db: &PgPool,
+    applicant_id: Uuid,
+) -> Result<ApplicantProfile, AppError> {
     let now = Utc::now();
     sqlx::query(
         r#"
@@ -255,7 +266,9 @@ pub async fn create_draft(
     let id = Uuid::new_v4();
     let appeal_code = format!("BJ-XX-QX-{}-{}", now.format("%Y%m%d"), &id.to_string()[..8]);
     let worker_name = input.worker_name.unwrap_or_else(|| "张三".to_string());
-    let worker_phone = input.worker_phone.unwrap_or_else(|| "13800001234".to_string());
+    let worker_phone = input
+        .worker_phone
+        .unwrap_or_else(|| "13800001234".to_string());
 
     let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
     sqlx::query(
@@ -270,9 +283,12 @@ pub async fn create_draft(
     .bind(id)
     .bind(applicant_id)
     .bind(&appeal_code)
-    .bind(input.oral_description.unwrap_or_default())
-    .bind(worker_name)
-    .bind(worker_phone)
+    .bind(clean_display_text(
+        &input.oral_description.unwrap_or_default(),
+        DEFAULT_ORAL_DESCRIPTION,
+    ))
+    .bind(clean_display_text(&worker_name, "张三"))
+    .bind(clean_display_text(&worker_phone, "13800001234"))
     .bind(now)
     .bind(appeal_status::DRAFT)
     .execute(&mut *tx)
@@ -286,7 +302,10 @@ pub async fn create_draft(
         "applicant",
         &applicant_id.to_string(),
         "创建草稿",
-        input.client_request_id.as_deref().unwrap_or("移动端创建欠薪诉求草稿"),
+        input
+            .client_request_id
+            .as_deref()
+            .unwrap_or("移动端创建欠薪诉求草稿"),
         true,
     )
     .await?;
@@ -322,16 +341,34 @@ pub async fn save_draft(
         "#,
     )
     .bind(appeal_id)
-    .bind(input.oral_description)
-    .bind(input.wage_amount_text)
-    .bind(input.employer_name)
-    .bind(input.contractor_name)
-    .bind(input.project_name)
-    .bind(input.work_period_text)
+    .bind(clean_optional_text(
+        input.oral_description,
+        DEFAULT_ORAL_DESCRIPTION,
+    ))
+    .bind(clean_optional_text(
+        input.wage_amount_text,
+        "待核实欠薪金额",
+    ))
+    .bind(clean_optional_text(
+        input.employer_name,
+        DEFAULT_EMPLOYER_NAME,
+    ))
+    .bind(clean_optional_text(
+        input.contractor_name,
+        DEFAULT_CONTRACTOR_NAME,
+    ))
+    .bind(clean_optional_text(
+        input.project_name,
+        DEFAULT_PROJECT_NAME,
+    ))
+    .bind(clean_optional_text(
+        input.work_period_text,
+        "待核实务工时间",
+    ))
     .bind(input.coworker_count)
-    .bind(input.demand_text)
-    .bind(input.worker_name)
-    .bind(input.worker_phone)
+    .bind(clean_optional_text(input.demand_text, DEFAULT_DEMAND_TEXT))
+    .bind(clean_optional_text(input.worker_name, "张三"))
+    .bind(clean_optional_text(input.worker_phone, "13800001234"))
     .bind(now)
     .execute(&mut *tx)
     .await
@@ -425,13 +462,15 @@ pub async fn save_location(
     ensure_appeal_owner_if_needed(db, appeal_id, Some(applicant_id)).await?;
     let now = Utc::now();
     let id = Uuid::new_v4();
-    let validation = crate::services::geo::validate_beijing_location(&crate::services::geo::GeoValidationInput {
-        latitude: input.latitude,
-        longitude: input.longitude,
-        address_text: input.address_text.clone(),
-        area_code: input.area_code.clone(),
-        area_name: input.area_name.clone(),
-    });
+    let validation = crate::services::geo::validate_beijing_location(
+        &crate::services::geo::GeoValidationInput {
+            latitude: input.latitude,
+            longitude: input.longitude,
+            address_text: clean_display_text(&input.address_text, DEFAULT_ADDRESS_TEXT),
+            area_code: input.area_code.clone(),
+            area_name: clean_display_text(&input.area_name, DEFAULT_AREA_NAME),
+        },
+    );
     let conflict_flags = crate::services::geo::conflict_flags_text(&validation.conflict_flags);
     let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
     sqlx::query(
@@ -460,9 +499,12 @@ pub async fn save_location(
     .bind(appeal_id)
     .bind(input.latitude)
     .bind(input.longitude)
-    .bind(input.address_text)
+    .bind(clean_display_text(
+        &input.address_text,
+        DEFAULT_ADDRESS_TEXT,
+    ))
     .bind(input.area_code)
-    .bind(input.area_name)
+    .bind(clean_display_text(&input.area_name, DEFAULT_AREA_NAME))
     .bind(input.confirmed_by_applicant)
     .bind(validation.confidence)
     .bind(conflict_flags)
@@ -495,15 +537,23 @@ pub async fn confirm_location_by_staff(
     get_appeal(db, appeal_id).await?;
     let existing = get_location(db, appeal_id).await?;
     let area_code = input.area_code.unwrap_or(existing.area_code);
-    let area_name = input.area_name.unwrap_or(existing.area_name);
-    let address_text = input.address_text.unwrap_or(existing.address_text);
-    let validation = crate::services::geo::validate_beijing_location(&crate::services::geo::GeoValidationInput {
-        latitude: existing.latitude,
-        longitude: existing.longitude,
-        address_text: address_text.clone(),
-        area_code: area_code.clone(),
-        area_name: area_name.clone(),
-    });
+    let area_name = clean_display_text(
+        &input.area_name.unwrap_or(existing.area_name),
+        DEFAULT_AREA_NAME,
+    );
+    let address_text = clean_display_text(
+        &input.address_text.unwrap_or(existing.address_text),
+        DEFAULT_ADDRESS_TEXT,
+    );
+    let validation = crate::services::geo::validate_beijing_location(
+        &crate::services::geo::GeoValidationInput {
+            latitude: existing.latitude,
+            longitude: existing.longitude,
+            address_text: address_text.clone(),
+            area_code: area_code.clone(),
+            area_name: area_name.clone(),
+        },
+    );
     let now = Utc::now();
     let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
     sqlx::query(
@@ -526,7 +576,9 @@ pub async fn confirm_location_by_staff(
     .bind(area_name)
     .bind(address_text)
     .bind(validation.confidence)
-    .bind(crate::services::geo::conflict_flags_text(&validation.conflict_flags))
+    .bind(crate::services::geo::conflict_flags_text(
+        &validation.conflict_flags,
+    ))
     .bind(staff_id)
     .bind(now)
     .execute(&mut *tx)
@@ -705,7 +757,10 @@ pub async fn supplement(
     get_appeal(db, appeal_id).await
 }
 
-pub async fn recompute_score(db: &PgPool, appeal_id: Uuid) -> Result<crate::domain::appeal_score::AppealScore, AppError> {
+pub async fn recompute_score(
+    db: &PgPool,
+    appeal_id: Uuid,
+) -> Result<crate::domain::appeal_score::AppealScore, AppError> {
     let appeal = get_appeal(db, appeal_id).await?;
     let location = maybe_location(db, appeal_id).await?;
     let categories = sqlx::query_scalar::<_, String>(
@@ -745,12 +800,13 @@ pub async fn ensure_appeal_owner_if_needed(
     applicant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
     if let Some(applicant_id) = applicant_id {
-        let owner = sqlx::query_scalar::<_, Uuid>("SELECT applicant_id FROM labor_appeals WHERE id = $1")
-            .bind(appeal_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|_| AppError::Internal)?
-            .ok_or(AppError::NotFound)?;
+        let owner =
+            sqlx::query_scalar::<_, Uuid>("SELECT applicant_id FROM labor_appeals WHERE id = $1")
+                .bind(appeal_id)
+                .fetch_optional(db)
+                .await
+                .map_err(|_| AppError::Internal)?
+                .ok_or(AppError::NotFound)?;
         if owner != applicant_id {
             return Err(AppError::Forbidden);
         }
@@ -875,11 +931,58 @@ pub fn actor_id(applicant_id: Option<Uuid>) -> String {
     applicant_id.map(|id| id.to_string()).unwrap_or_default()
 }
 
+pub fn clean_display_text(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || looks_like_corrupted_text(trimmed) {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn clean_optional_text(value: Option<String>, fallback: &str) -> Option<String> {
+    value.map(|text| clean_display_text(&text, fallback))
+}
+
+fn looks_like_corrupted_text(value: &str) -> bool {
+    if value.contains("???") || value.contains("�") {
+        return true;
+    }
+
+    let total = value.chars().count();
+    if total == 0 {
+        return false;
+    }
+    let question_count = value.chars().filter(|ch| *ch == '?').count();
+    question_count >= 2 && question_count * 5 >= total
+}
+
 pub fn mask_phone(phone: &str) -> String {
     if phone.len() >= 11 {
         format!("{}****{}", &phone[..3], &phone[7..])
     } else {
         phone.to_string()
+    }
+}
+
+#[cfg(test)]
+mod text_sanitizer_tests {
+    use super::*;
+
+    #[test]
+    fn clean_display_text_keeps_normal_question_sentence() {
+        assert_eq!(
+            clean_display_text("老板是谁? 我只知道姓王", "fallback"),
+            "老板是谁? 我只知道姓王"
+        );
+    }
+
+    #[test]
+    fn clean_display_text_replaces_replacement_question_runs() {
+        assert_eq!(
+            clean_display_text("???XX?XX??????欠薪诉求", "北京市XX区欠薪诉求"),
+            "北京市XX区欠薪诉求"
+        );
     }
 }
 
