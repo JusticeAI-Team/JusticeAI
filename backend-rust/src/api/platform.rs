@@ -4873,6 +4873,12 @@ fn spawn_appeal_standardization_job(state: AppState, job_id: Uuid, appeal_id: Uu
                 .await;
             }
             Err(error) => {
+                let _ = appeal_standardization_service::mark_standardization_failed(
+                    state.db(),
+                    appeal_id,
+                    &app_error_message(&error),
+                )
+                .await;
                 let _ = fail_platform_job(state.db(), job_id, &app_error_message(&error)).await;
             }
         }

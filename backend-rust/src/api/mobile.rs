@@ -8,11 +8,15 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
+    api::platform,
     app::AppState,
-    services::appeal_service::{
-        self, AppealEventRow, AppealLocationRow, AppealMaterialRow, AppealNotificationRow,
-        ApplicantProfile, CreateDraftInput, LaborAppealRow, SaveDraftInput, SaveLocationInput,
-        SubmitInput, DEV_APPLICANT_ID,
+    services::{
+        appeal_service::{
+            self, AppealEventRow, AppealLocationRow, AppealMaterialRow, AppealNotificationRow,
+            ApplicantProfile, CreateDraftInput, LaborAppealRow, SaveDraftInput, SaveLocationInput,
+            SubmitInput, DEV_APPLICANT_ID,
+        },
+        appeal_standardization_service,
     },
     shared::{
         error::AppError,
@@ -63,7 +67,12 @@ async fn create_draft(
     Json(input): Json<CreateDraftInput>,
 ) -> Result<Json<ApiResponse<LaborAppealRow>>, AppError> {
     let applicant_id = applicant_id(&headers)?;
-    Ok(ok(appeal_service::create_draft(state.db(), applicant_id, input).await?))
+    Ok(ok(appeal_service::create_draft(
+        state.db(),
+        applicant_id,
+        input,
+    )
+    .await?))
 }
 
 async fn save_draft(
@@ -73,9 +82,13 @@ async fn save_draft(
     Json(input): Json<SaveDraftInput>,
 ) -> Result<Json<ApiResponse<LaborAppealRow>>, AppError> {
     let applicant_id = applicant_id(&headers)?;
-    Ok(ok(
-        appeal_service::save_draft(state.db(), Some(applicant_id), id, input).await?,
-    ))
+    Ok(ok(appeal_service::save_draft(
+        state.db(),
+        Some(applicant_id),
+        id,
+        input,
+    )
+    .await?))
 }
 
 async fn submit(
@@ -85,9 +98,9 @@ async fn submit(
     Json(input): Json<SubmitInput>,
 ) -> Result<Json<ApiResponse<LaborAppealRow>>, AppError> {
     let applicant_id = applicant_id(&headers)?;
-    Ok(ok(
-        appeal_service::submit_appeal(state.db(), applicant_id, id, input).await?,
-    ))
+    let appeal = appeal_service::submit_appeal(state.db(), applicant_id, id, input).await?;
+    enqueue_and_start_standardization(&state, id, "mobile_submit").await?;
+    Ok(ok(appeal))
 }
 
 async fn save_location(
@@ -97,9 +110,13 @@ async fn save_location(
     Json(input): Json<SaveLocationInput>,
 ) -> Result<Json<ApiResponse<AppealLocationRow>>, AppError> {
     let applicant_id = applicant_id(&headers)?;
-    Ok(ok(
-        appeal_service::save_location(state.db(), applicant_id, id, input).await?,
-    ))
+    Ok(ok(appeal_service::save_location(
+        state.db(),
+        applicant_id,
+        id,
+        input,
+    )
+    .await?))
 }
 
 async fn my_appeals(
@@ -107,7 +124,11 @@ async fn my_appeals(
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<LaborAppealRow>>>, AppError> {
     let applicant_id = applicant_id(&headers)?;
-    Ok(ok(appeal_service::list_mobile_appeals(state.db(), applicant_id).await?))
+    Ok(ok(appeal_service::list_mobile_appeals(
+        state.db(),
+        applicant_id,
+    )
+    .await?))
 }
 
 async fn appeal_detail(
@@ -140,9 +161,11 @@ async fn notifications(
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<AppealNotificationRow>>>, AppError> {
     let applicant_id = applicant_id(&headers)?;
-    Ok(ok(
-        appeal_service::list_notifications(state.db(), applicant_id).await?,
-    ))
+    Ok(ok(appeal_service::list_notifications(
+        state.db(),
+        applicant_id,
+    )
+    .await?))
 }
 
 async fn read_notification(
@@ -151,9 +174,12 @@ async fn read_notification(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<AppealNotificationRow>>, AppError> {
     let applicant_id = applicant_id(&headers)?;
-    Ok(ok(
-        appeal_service::mark_notification_read(state.db(), applicant_id, id).await?,
-    ))
+    Ok(ok(appeal_service::mark_notification_read(
+        state.db(),
+        applicant_id,
+        id,
+    )
+    .await?))
 }
 
 async fn supplement(
@@ -162,7 +188,20 @@ async fn supplement(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<LaborAppealRow>>, AppError> {
     let applicant_id = applicant_id(&headers)?;
-    Ok(ok(appeal_service::supplement(state.db(), applicant_id, id).await?))
+    let appeal = appeal_service::supplement(state.db(), applicant_id, id).await?;
+    enqueue_and_start_standardization(&state, id, "mobile_supplement").await?;
+    Ok(ok(appeal))
+}
+
+async fn enqueue_and_start_standardization(
+    state: &AppState,
+    appeal_id: Uuid,
+    reason: &str,
+) -> Result<(), AppError> {
+    let job_id =
+        appeal_standardization_service::enqueue_standardization_job(state.db(), appeal_id, reason)
+            .await?;
+    platform::start_existing_platform_job(state.clone(), job_id).await
 }
 
 fn applicant_id(headers: &HeaderMap) -> Result<Uuid, AppError> {

@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     app::AppState,
+    domain::appeal_status,
     services::{
         ai::{AppealStandardizationInput, OpenAiCompatibleAiService},
         appeal_service::{self, mask_phone},
@@ -18,6 +19,102 @@ use crate::{
 };
 
 pub const PROMPT_VERSION: &str = "labor_appeal_standardization_v1";
+
+pub async fn enqueue_standardization_job(
+    db: &PgPool,
+    appeal_id: Uuid,
+    reason: &str,
+) -> Result<Uuid, AppError> {
+    let appeal = appeal_service::get_appeal(db, appeal_id).await?;
+    if let Some(existing_id) = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM platform_jobs
+        WHERE job_type = 'appeal_standardization'
+          AND target_type = 'labor_appeal'
+          AND target_id = $1
+          AND status IN ('queued', 'running')
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(appeal_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)?
+    {
+        return Ok(existing_id);
+    }
+
+    if !matches!(
+        appeal.status.as_str(),
+        appeal_status::SUBMITTED
+            | appeal_status::SUBMITTED_INCOMPLETE
+            | appeal_status::UNDER_REVIEW
+            | appeal_status::STANDARDIZING
+    ) {
+        return Err(AppError::Conflict(format!(
+            "current status {} cannot start standardization",
+            appeal.status
+        )));
+    }
+
+    let now = Utc::now();
+    let job_id = Uuid::new_v4();
+    let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
+    sqlx::query(
+        r#"
+        UPDATE labor_appeals
+        SET status = 'standardizing',
+            updated_at = $2
+        WHERE id = $1
+          AND status IN ('submitted', 'submitted_incomplete', 'under_review')
+        "#,
+    )
+    .bind(appeal_id)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    appeal_service::insert_event_tx(
+        &mut tx,
+        appeal_id,
+        "standardization_started",
+        "system",
+        "appeal_standardization",
+        "智能整理开始",
+        "系统正在将口语化诉求整理为检察院可审核的标准材料。",
+        true,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO platform_jobs (
+            id, job_type, target_type, target_id, status, progress_percent, message,
+            request_json, result_json, error_message, started_at, finished_at, created_at, updated_at
+        )
+        VALUES ($1, 'appeal_standardization', 'labor_appeal', $2, 'queued', 0, $3,
+            $4, '{}', NULL, NULL, NULL, $5, $5)
+        "#,
+    )
+    .bind(job_id)
+    .bind(appeal_id)
+    .bind("queued labor appeal standardization job")
+    .bind(
+        serde_json::json!({
+            "appeal_id": appeal_id,
+            "prompt_version": PROMPT_VERSION,
+            "reason": reason
+        })
+        .to_string(),
+    )
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    tx.commit().await.map_err(|_| AppError::Internal)?;
+    Ok(job_id)
+}
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct AppealStandardizationRow {
@@ -116,6 +213,7 @@ pub async fn standardize_appeal(
 
     if let Some(existing) = latest_standardization(state.db(), appeal_id).await? {
         if existing.status == "completed" && existing.input_digest == input_digest {
+            mark_standardization_done(state.db(), appeal_id).await?;
             return Ok(existing);
         }
     }
@@ -148,7 +246,12 @@ pub async fn standardize_appeal(
         .clone()
         .unwrap_or_else(|| service.configured_contract());
     let output_json = serde_json::to_value(&output).map_err(|_| AppError::Internal)?;
-    let standard_summary = output.standardized_text.lines().next().unwrap_or("").to_string();
+    let standard_summary = output
+        .standardized_text
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
 
     let mut tx = state.db().begin().await.map_err(|_| AppError::Internal)?;
     sqlx::query(
@@ -219,9 +322,99 @@ pub async fn standardize_appeal(
         false,
     )
     .await?;
+    mark_standardization_done_tx(&mut tx, appeal_id, now).await?;
 
     tx.commit().await.map_err(|_| AppError::Internal)?;
     load_standardization(state.db(), id).await
+}
+
+async fn mark_standardization_done(db: &PgPool, appeal_id: Uuid) -> Result<(), AppError> {
+    let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
+    mark_standardization_done_tx(&mut tx, appeal_id, Utc::now()).await?;
+    tx.commit().await.map_err(|_| AppError::Internal)
+}
+
+async fn mark_standardization_done_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    appeal_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE labor_appeals
+        SET status = 'under_review',
+            updated_at = $2
+        WHERE id = $1
+          AND status = 'standardizing'
+        "#,
+    )
+    .bind(appeal_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
+}
+
+pub async fn mark_standardization_failed(
+    db: &PgPool,
+    appeal_id: Uuid,
+    error_message: &str,
+) -> Result<(), AppError> {
+    let now = Utc::now();
+    let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
+    sqlx::query(
+        r#"
+        INSERT INTO appeal_standardizations (
+            id, appeal_id, status, provider_style, model_name, prompt_version, input_digest,
+            input_snapshot, output_json, standardized_title, standard_summary, standardized_text,
+            extracted_fields, missing_materials, conflict_items, evidence_assessment,
+            risk_case_mapping, confidence, human_revision_json, reviewed_by, error_message,
+            created_at, updated_at
+        )
+        VALUES (
+            $1, $2, 'failed', 'openai-compatible', '', $3, '',
+            '{}'::jsonb, '{}'::jsonb, '', '', '',
+            '{}'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+            '{}'::jsonb, NULL, '{}'::jsonb, '', $4, $5, $5
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(appeal_id)
+    .bind(PROMPT_VERSION)
+    .bind(error_message.chars().take(500).collect::<String>())
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    sqlx::query(
+        r#"
+        UPDATE labor_appeals
+        SET status = 'submitted_incomplete',
+            updated_at = $2
+        WHERE id = $1
+          AND status = 'standardizing'
+        "#,
+    )
+    .bind(appeal_id)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    appeal_service::insert_event_tx(
+        &mut tx,
+        appeal_id,
+        "standardization_failed",
+        "system",
+        "appeal_standardization",
+        "智能整理未完成",
+        "系统暂未完成标准化整理，线索仍保留为已提交状态，工作人员可继续人工审核。",
+        true,
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AppError::Internal)?;
+    Ok(())
 }
 
 pub async fn list_standardizations(
@@ -270,7 +463,11 @@ pub async fn review_standardization(
     )
     .bind(standardization_id)
     .bind(appeal_id)
-    .bind(input.human_revision_json.unwrap_or_else(|| serde_json::json!({})))
+    .bind(
+        input
+            .human_revision_json
+            .unwrap_or_else(|| serde_json::json!({})),
+    )
     .bind(reviewed_by)
     .bind(Utc::now())
     .fetch_optional(db)
@@ -279,10 +476,7 @@ pub async fn review_standardization(
     .ok_or(AppError::NotFound)
 }
 
-async fn load_standardization(
-    db: &PgPool,
-    id: Uuid,
-) -> Result<AppealStandardizationRow, AppError> {
+async fn load_standardization(db: &PgPool, id: Uuid) -> Result<AppealStandardizationRow, AppError> {
     sqlx::query_as::<_, AppealStandardizationRow>(
         "SELECT * FROM appeal_standardizations WHERE id = $1",
     )
