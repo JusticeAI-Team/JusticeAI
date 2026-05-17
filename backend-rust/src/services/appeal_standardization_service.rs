@@ -12,7 +12,7 @@ use crate::{
     app::AppState,
     services::{
         ai::{AppealStandardizationInput, OpenAiCompatibleAiService},
-        appeal_service,
+        appeal_service::{self, mask_phone},
     },
     shared::error::AppError,
 };
@@ -61,9 +61,10 @@ pub async fn standardize_appeal(
     let materials = appeal_service::list_materials(state.db(), appeal_id).await?;
     let location = appeal_service::maybe_location(state.db(), appeal_id).await?;
     let missing_materials = split_missing_materials(&appeal.missing_materials);
+    let sanitized_oral_description = mask_phone_like_text(&appeal.oral_description);
     let structured_fields = serde_json::json!({
         "worker_name": appeal.worker_name,
-        "worker_phone": appeal.worker_phone,
+        "worker_phone": mask_phone(&appeal.worker_phone),
         "wage_amount_text": appeal.wage_amount_text,
         "employer_name": appeal.employer_name,
         "contractor_name": appeal.contractor_name,
@@ -102,7 +103,7 @@ pub async fn standardize_appeal(
     let input_snapshot = serde_json::json!({
         "appeal_id": appeal.id,
         "appeal_code": appeal.appeal_code,
-        "oral_description": appeal.oral_description,
+        "oral_description": sanitized_oral_description,
         "structured_fields": structured_fields,
         "materials": material_snapshot,
         "location": location_snapshot,
@@ -297,6 +298,32 @@ fn split_missing_materials(value: &str) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn mask_phone_like_text(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut output = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index].is_ascii_digit() {
+            let start = index;
+            while index < chars.len() && chars[index].is_ascii_digit() {
+                index += 1;
+            }
+            if index - start == 11 {
+                let token: String = chars[start..index].iter().collect();
+                output.push_str(&mask_phone(&token));
+            } else {
+                for ch in &chars[start..index] {
+                    output.push(*ch);
+                }
+            }
+        } else {
+            output.push(chars[index]);
+            index += 1;
+        }
+    }
+    output
 }
 
 fn digest_json(value: &serde_json::Value) -> String {
