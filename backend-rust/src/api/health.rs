@@ -158,7 +158,7 @@ async fn health(State(state): State<AppState>) -> axum::Json<ApiResponse<HealthR
                 key: "postgres",
                 label: "PostgreSQL",
                 status: postgres,
-                endpoint: state.settings().database.url.clone(),
+                endpoint: redact_database_url(&state.settings().database.url),
                 checked_at: checked_at.clone(),
                 message: "database connectivity is required for all platform modules".to_string(),
             },
@@ -318,5 +318,28 @@ fn storage_status(key: &'static str, path: &str) -> StorageStatus {
         path: path.to_string(),
         exists,
         writable,
+    }
+}
+
+fn redact_database_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let Some((credentials, host)) = rest.split_once('@') else {
+        return url.to_string();
+    };
+    let user = credentials.split(':').next().unwrap_or("user");
+    format!("{scheme}://{user}:***@{host}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_url_redaction_hides_password() {
+        let redacted = redact_database_url("postgres://justiceai:secret@postgres:5432/justiceai");
+        assert_eq!(redacted, "postgres://justiceai:***@postgres:5432/justiceai");
+        assert!(!redacted.contains("secret"));
     }
 }
