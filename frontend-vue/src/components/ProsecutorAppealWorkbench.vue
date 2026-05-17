@@ -157,14 +157,14 @@
             <article class="standard-section" v-if="standardization">
               <header>
                 <strong>缺失材料与冲突信息</strong>
-                <span>需人工复核</span>
+                <button @click="requestMaterials">按智能建议补证</button>
               </header>
               <div class="evidence-checks">
-                <span v-for="item in standardMissingMaterials" :key="item.label || item">{{ item.label || item }}</span>
+                <span v-for="(item, index) in standardMissingMaterials" :key="materialRequestLabel(item) || index">{{ materialRequestLabel(item) }}</span>
                 <span v-if="standardMissingMaterials.length === 0">未识别到缺失材料</span>
               </div>
               <div class="conflict-list">
-                <p v-for="item in standardConflicts" :key="item.description || item">{{ item.description || item }}</p>
+                <p v-for="(item, index) in standardConflicts" :key="conflictDescription(item) || index">{{ conflictDescription(item) }}</p>
                 <p v-if="standardConflicts.length === 0">未识别到明显冲突。</p>
               </div>
             </article>
@@ -422,14 +422,79 @@ const setStatus = async (status) => {
   await loadAppeals()
 }
 
+const compactUnique = (items) => Array.from(new Set(items.map((item) => `${item || ''}`.trim()).filter(Boolean)))
+
+const deadlineAfterDays = (days) => {
+  const date = new Date()
+  date.setDate(date.getDate() + days)
+  const year = date.getFullYear()
+  const month = `${date.getMonth() + 1}`.padStart(2, '0')
+  const day = `${date.getDate()}`.padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const materialRequestLabel = (item) => {
+  if (!item) return ''
+  if (typeof item === 'string') return item
+  return item.label || item.name || item.title || materialLabel(item.category) || ''
+}
+
+const materialRequestReason = (item) => {
+  if (!item || typeof item === 'string') return ''
+  return item.reason || item.description || ''
+}
+
+const conflictDescription = (item) => {
+  if (!item) return ''
+  if (typeof item === 'string') return item
+  return item.description || item.reason || item.field || ''
+}
+
+const buildSupplementRequest = () => {
+  const aiRequests = compactUnique(standardMissingMaterials.value.map(materialRequestLabel))
+  const ruleRequests = compactUnique(missingMaterials.value)
+  const requestMaterials = aiRequests.length > 0
+    ? aiRequests
+    : ruleRequests.length > 0
+      ? ruleRequests
+      : ['劳动合同或用工证明', '工资记录', '考勤记录']
+
+  const reasonLines = standardMissingMaterials.value
+    .map((item) => {
+      const label = materialRequestLabel(item)
+      const reason = materialRequestReason(item)
+      return label && reason ? `${label}：${reason}` : ''
+    })
+    .filter(Boolean)
+    .slice(0, 3)
+
+  const conflictLines = standardConflicts.value
+    .map(conflictDescription)
+    .filter(Boolean)
+    .slice(0, 3)
+
+  const evidenceScore = standardEvidence.value.score ?? detail.value?.appeal.material_score ?? 0
+  const evidenceLevel = standardEvidence.value.level || '待评估'
+  const source = aiRequests.length > 0 ? '智能标准化建议' : ruleRequests.length > 0 ? '材料完整度评分' : '默认欠薪证据链'
+
+  return {
+    request_materials: requestMaterials,
+    message: reasonLines.length > 0
+      ? `请补充以下材料以便核实欠薪事实：${requestMaterials.join('、')}。${reasonLines.join('；')}。如果暂时没有对应材料，可以先上传聊天记录、转账记录、工友证明或现场照片。`
+      : `请补充能证明工作关系和欠薪金额的材料：${requestMaterials.join('、')}。如果暂时没有，可以先上传聊天记录、转账记录、工友证明或现场照片。`,
+    deadline: deadlineAfterDays(7),
+    internal_note: [
+      `补证来源：${source}`,
+      `证据强度：${evidenceLevel}，证据分：${evidenceScore}`,
+      conflictLines.length > 0 ? `待核实冲突：${conflictLines.join('；')}` : '',
+      `当前材料完整度：${detail.value?.appeal.material_score ?? 0}%`
+    ].filter(Boolean).join('；')
+  }
+}
+
 const requestMaterials = async () => {
   if (!activeId.value) return
-  await apiPost(`/prosecutor/appeals/${activeId.value}/request-materials`, {
-    request_materials: ['劳动合同或用工证明', '工资记录', '考勤记录'],
-    message: '请补充能证明工作关系和欠薪金额的材料；如果暂时没有，可以先上传聊天记录、转账记录或工友证明。',
-    deadline: '2026-05-25',
-    internal_note: '当前材料链不完整，需补强工作关系和欠薪金额。'
-  }, { headers: STAFF_HEADERS })
+  await apiPost(`/prosecutor/appeals/${activeId.value}/request-materials`, buildSupplementRequest(), { headers: STAFF_HEADERS })
   await afterAction()
 }
 
