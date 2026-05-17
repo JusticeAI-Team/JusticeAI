@@ -413,8 +413,35 @@ CREATE TABLE IF NOT EXISTS appeal_locations (
     updated_at TIMESTAMPTZ NOT NULL
 );
 
+ALTER TABLE appeal_locations
+    ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS conflict_flags TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS confirmed_by_staff BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS staff_confirmed_by TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS staff_confirmed_at TIMESTAMPTZ;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_appeal_locations_appeal_id
     ON appeal_locations (appeal_id);
+
+CREATE INDEX IF NOT EXISTS idx_appeal_locations_area_code
+    ON appeal_locations (area_code);
+
+CREATE TABLE IF NOT EXISTS administrative_regions (
+    id UUID PRIMARY KEY,
+    region_code TEXT NOT NULL,
+    region_name TEXT NOT NULL,
+    parent_code TEXT NOT NULL DEFAULT '',
+    level TEXT NOT NULL,
+    version TEXT NOT NULL,
+    geojson JSONB,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (region_code, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_administrative_regions_code
+    ON administrative_regions (region_code);
 
 CREATE TABLE IF NOT EXISTS appeal_events (
     id UUID PRIMARY KEY,

@@ -1,13 +1,16 @@
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Json, Router};
 use serde::Serialize;
 
 use crate::{
     app::AppState,
+    services::geo::{validate_beijing_location, GeoValidationInput, GeoValidationResult},
     shared::response::{ok, ApiResponse},
 };
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/geo/beijing-districts", get(beijing_districts))
+    Router::new()
+        .route("/geo/beijing-districts", get(beijing_districts))
+        .route("/geo/locations/validate", post(validate_location))
 }
 
 #[derive(Debug, Serialize)]
@@ -39,4 +42,10 @@ async fn beijing_districts() -> axum::Json<ApiResponse<Vec<District>>> {
             area_name: "北京市大兴区",
         },
     ])
+}
+
+async fn validate_location(
+    Json(input): Json<GeoValidationInput>,
+) -> axum::Json<ApiResponse<GeoValidationResult>> {
+    ok(validate_beijing_location(&input))
 }

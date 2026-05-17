@@ -17,7 +17,7 @@ use crate::{
         appeal_service::{
             self, mask_name, mask_phone, AppealEventRow, AppealLocationRow, AppealMaterialRow,
             AppealRiskCaseLinkRow, ConvertRiskCaseInput, LaborAppealRow, LinkRiskCaseInput,
-            RequestMaterialsInput, ResolveInput, StatusActionInput,
+            RequestMaterialsInput, ResolveInput, StaffConfirmLocationInput, StatusActionInput,
         },
     },
     shared::{
@@ -42,6 +42,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/prosecutor/appeals/:id/link-risk-case", post(link_risk_case))
         .route("/prosecutor/appeals/:id/resolve", post(resolve))
+        .route(
+            "/prosecutor/appeals/:id/location/confirm",
+            post(confirm_location),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -440,6 +444,17 @@ async fn resolve(
         .await?;
     }
     tx.commit().await.map_err(|_| AppError::Internal)?;
+    Ok(ok(load_detail(state.db(), id).await?))
+}
+
+async fn confirm_location(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<StaffConfirmLocationInput>,
+) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
+    let staff_id = staff_id(&headers);
+    appeal_service::confirm_location_by_staff(state.db(), id, &staff_id, input).await?;
     Ok(ok(load_detail(state.db(), id).await?))
 }
 

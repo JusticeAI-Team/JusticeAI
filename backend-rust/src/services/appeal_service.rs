@@ -78,6 +78,11 @@ pub struct AppealLocationRow {
     pub area_name: String,
     pub confirmed_by_applicant: bool,
     pub geo_source: String,
+    pub confidence: Option<f64>,
+    pub conflict_flags: String,
+    pub confirmed_by_staff: bool,
+    pub staff_confirmed_by: String,
+    pub staff_confirmed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -154,6 +159,13 @@ pub struct SaveLocationInput {
     pub area_code: String,
     pub area_name: String,
     pub confirmed_by_applicant: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StaffConfirmLocationInput {
+    pub area_code: Option<String>,
+    pub area_name: Option<String>,
+    pub address_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -409,14 +421,22 @@ pub async fn save_location(
     ensure_appeal_owner_if_needed(db, appeal_id, Some(applicant_id)).await?;
     let now = Utc::now();
     let id = Uuid::new_v4();
+    let validation = crate::services::geo::validate_beijing_location(&crate::services::geo::GeoValidationInput {
+        latitude: input.latitude,
+        longitude: input.longitude,
+        address_text: input.address_text.clone(),
+        area_code: input.area_code.clone(),
+        area_name: input.area_name.clone(),
+    });
+    let conflict_flags = crate::services::geo::conflict_flags_text(&validation.conflict_flags);
     let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
     sqlx::query(
         r#"
         INSERT INTO appeal_locations (
             id, appeal_id, latitude, longitude, address_text, area_code, area_name,
-            confirmed_by_applicant, geo_source, created_at, updated_at
+            confirmed_by_applicant, geo_source, confidence, conflict_flags, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'applicant_map', $9, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'applicant_map', $9, $10, $11, $11)
         ON CONFLICT (appeal_id) DO UPDATE SET
             latitude = EXCLUDED.latitude,
             longitude = EXCLUDED.longitude,
@@ -424,6 +444,11 @@ pub async fn save_location(
             area_code = EXCLUDED.area_code,
             area_name = EXCLUDED.area_name,
             confirmed_by_applicant = EXCLUDED.confirmed_by_applicant,
+            confidence = EXCLUDED.confidence,
+            conflict_flags = EXCLUDED.conflict_flags,
+            confirmed_by_staff = FALSE,
+            staff_confirmed_by = '',
+            staff_confirmed_at = NULL,
             updated_at = EXCLUDED.updated_at
         "#,
     )
@@ -435,6 +460,8 @@ pub async fn save_location(
     .bind(input.area_code)
     .bind(input.area_name)
     .bind(input.confirmed_by_applicant)
+    .bind(validation.confidence)
+    .bind(conflict_flags)
     .bind(now)
     .execute(&mut *tx)
     .await
@@ -452,6 +479,67 @@ pub async fn save_location(
     .await?;
     tx.commit().await.map_err(|_| AppError::Internal)?;
     recompute_score(db, appeal_id).await?;
+    get_location(db, appeal_id).await
+}
+
+pub async fn confirm_location_by_staff(
+    db: &PgPool,
+    appeal_id: Uuid,
+    staff_id: &str,
+    input: StaffConfirmLocationInput,
+) -> Result<AppealLocationRow, AppError> {
+    get_appeal(db, appeal_id).await?;
+    let existing = get_location(db, appeal_id).await?;
+    let area_code = input.area_code.unwrap_or(existing.area_code);
+    let area_name = input.area_name.unwrap_or(existing.area_name);
+    let address_text = input.address_text.unwrap_or(existing.address_text);
+    let validation = crate::services::geo::validate_beijing_location(&crate::services::geo::GeoValidationInput {
+        latitude: existing.latitude,
+        longitude: existing.longitude,
+        address_text: address_text.clone(),
+        area_code: area_code.clone(),
+        area_name: area_name.clone(),
+    });
+    let now = Utc::now();
+    let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
+    sqlx::query(
+        r#"
+        UPDATE appeal_locations
+        SET area_code = $2,
+            area_name = $3,
+            address_text = $4,
+            confidence = $5,
+            conflict_flags = $6,
+            confirmed_by_staff = TRUE,
+            staff_confirmed_by = $7,
+            staff_confirmed_at = $8,
+            updated_at = $8
+        WHERE appeal_id = $1
+        "#,
+    )
+    .bind(appeal_id)
+    .bind(area_code)
+    .bind(area_name)
+    .bind(address_text)
+    .bind(validation.confidence)
+    .bind(crate::services::geo::conflict_flags_text(&validation.conflict_flags))
+    .bind(staff_id)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    insert_event_tx(
+        &mut tx,
+        appeal_id,
+        "location_staff_confirmed",
+        "staff",
+        staff_id,
+        "人工确认定位",
+        "工作人员已确认定位点与行政区划",
+        true,
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AppError::Internal)?;
     get_location(db, appeal_id).await
 }
 

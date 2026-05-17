@@ -184,10 +184,13 @@
 
           <section v-else-if="activeTab === 'raw'" class="doc-body raw-body">
             <article class="trace-card">
-              <header><strong>定位与行政区</strong><button>查看定位</button></header>
+              <header><strong>定位与行政区</strong><button @click="confirmLocation">人工确认</button></header>
               <p>定位点：{{ locationText }}</p>
               <p>经纬度：{{ detail.location?.latitude || '-' }}, {{ detail.location?.longitude || '-' }}</p>
               <p>行政区：{{ detail.location?.area_name || '待确认' }} / {{ detail.location?.area_code || '-' }}</p>
+              <p>校验置信度：{{ Math.round((detail.location?.confidence || 0) * 100) }}%</p>
+              <p>冲突标记：{{ detail.location?.conflict_flags || '无' }}</p>
+              <p>人工确认：{{ detail.location?.confirmed_by_staff ? '已确认' : '待确认' }}</p>
             </article>
 
             <article class="trace-card">
@@ -245,6 +248,7 @@
             <p>可用动作：{{ detail.available_actions.join('、') || '暂无' }}</p>
             <p>风险案件状态：{{ detail.appeal.risk_case_status }}</p>
             <p>关联案件数：{{ detail.risk_case_links.length }}</p>
+            <p>定位确认：{{ detail.location?.confirmed_by_staff ? '工作人员已确认' : '等待人工确认' }}</p>
           </article>
 
           <article class="trace-card">
@@ -341,6 +345,16 @@ const requestMaterials = async () => {
     internal_note: '当前材料链不完整，需补强工作关系和欠薪金额。'
   }, { headers: STAFF_HEADERS })
   await afterAction()
+}
+
+const confirmLocation = async () => {
+  if (!activeId.value || !detail.value?.location) return
+  await apiPost(`/prosecutor/appeals/${activeId.value}/location/confirm`, {
+    area_code: detail.value.location.area_code,
+    area_name: detail.value.location.area_name,
+    address_text: detail.value.location.address_text
+  }, { headers: STAFF_HEADERS })
+  await loadDetail()
 }
 
 const runStandardization = async () => {

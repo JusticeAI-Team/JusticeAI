@@ -6,5 +6,6 @@ pub mod appeal_standardization_service;
 pub mod appeal_service;
 pub mod embedding;
 pub mod graph;
+pub mod geo;
 pub mod pipeline;
 pub mod vector;
