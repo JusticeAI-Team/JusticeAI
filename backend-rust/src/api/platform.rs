@@ -19,6 +19,7 @@ use crate::{
             ModelContract as AiModelContract, OpenAiCompatibleAiService, RecommendationInput,
             RecommendationOutput, ReportInput,
         },
+        appeal_standardization_service,
         embedding::{EmbeddingContract, OpenAiCompatibleEmbeddingService},
         graph::{GraphCaseSyncInput, GraphEntitySync, GraphRelationSync, HugeGraphSyncService},
         pipeline::{execute_extraction_run, process_import_batch},
@@ -3157,6 +3158,10 @@ async fn rebuild_graph_case(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ActionResponse>>, AppError> {
+    Ok(ok(rebuild_graph_case_inner(&state, id).await?))
+}
+
+async fn rebuild_graph_case_inner(state: &AppState, id: Uuid) -> Result<ActionResponse, AppError> {
     let now_at = Utc::now();
     let case = sqlx::query_as::<_, GraphCaseSyncRow>(
         r#"
@@ -3185,13 +3190,13 @@ async fn rebuild_graph_case(
     .map_err(|_| AppError::Internal)?;
 
     if entities.is_empty() {
-        return Ok(ok(ActionResponse {
+        return Ok(ActionResponse {
             id: id.to_string(),
             status: "pending_extraction".to_string(),
             message: "case has no extracted entities yet; run /api/extraction/run before rebuilding HugeGraph".to_string(),
             updated_at: now_at.to_rfc3339(),
             is_placeholder: false,
-        }));
+        });
     }
 
     let relations = sqlx::query_as::<_, GraphRelationSyncRow>(
@@ -3215,7 +3220,7 @@ async fn rebuild_graph_case(
     .map_err(|_| AppError::Internal)?;
 
     let integration_values = load_setting_map(state.db(), "integrations").await?;
-    let graph_service = build_hugegraph_service(&state, &integration_values);
+    let graph_service = build_hugegraph_service(state, &integration_values);
     let sync_input = GraphCaseSyncInput {
         case_id: case.id.to_string(),
         case_code: case.case_code.clone(),
@@ -3267,13 +3272,13 @@ async fn rebuild_graph_case(
                 now_at,
             )
             .await?;
-            Ok(ok(ActionResponse {
+            Ok(ActionResponse {
                 id: id.to_string(),
                 status: result.status,
                 message,
                 updated_at: Utc::now().to_rfc3339(),
                 is_placeholder: false,
-            }))
+            })
         }
         Err(error) => {
             update_risk_case_graph_sync_status(state.db(), id, "failed", &error, Utc::now())
@@ -3289,13 +3294,13 @@ async fn rebuild_graph_case(
                 now_at,
             )
             .await?;
-            Ok(ok(ActionResponse {
+            Ok(ActionResponse {
                 id: id.to_string(),
                 status: "failed".to_string(),
                 message: error,
                 updated_at: Utc::now().to_rfc3339(),
                 is_placeholder: false,
-            }))
+            })
         }
     }
 }
@@ -3304,10 +3309,17 @@ async fn rebuild_case_vector(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<VectorActionResponse>>, AppError> {
+    Ok(ok(rebuild_case_vector_inner(&state, id).await?))
+}
+
+async fn rebuild_case_vector_inner(
+    state: &AppState,
+    id: Uuid,
+) -> Result<VectorActionResponse, AppError> {
     let document = load_vector_case_document(state.db(), id).await?;
     let integration_values = load_setting_map(state.db(), "integrations").await?;
-    let embedding_service = build_embedding_service(&state, &integration_values);
-    let vector_store = build_vector_store(&state, &integration_values);
+    let embedding_service = build_embedding_service(state, &integration_values);
+    let vector_store = build_vector_store(state, &integration_values);
     let query_text = vector_document_text(&document);
     let embedding = embedding_service
         .embed_text(&query_text)
@@ -3353,7 +3365,7 @@ async fn rebuild_case_vector(
     )
     .await?;
 
-    Ok(ok(VectorActionResponse {
+    Ok(VectorActionResponse {
         case_id: document.case_id,
         case_code: document.case_code,
         status: sync_result.status,
@@ -3361,7 +3373,7 @@ async fn rebuild_case_vector(
         embedding_dimension,
         model_contract: embedding_service.contract(),
         updated_at: now_at.to_rfc3339(),
-    }))
+    })
 }
 
 async fn case_vector_similar(
@@ -4765,10 +4777,359 @@ async fn retry_platform_job(
             spawn_report_job(state, job_id, payload);
             Ok(ok(job))
         }
+        "appeal_standardization"
+        | "appeal_risk_case_agent_analyze"
+        | "appeal_risk_case_graph_rebuild"
+        | "appeal_risk_case_vector_rebuild"
+        | "appeal_similar_case_discovery" => {
+            let target_id = parse_job_target_uuid(&previous)?;
+            let job_id = Uuid::new_v4();
+            let request = serde_json::json!({
+                "action": previous.job_type.clone(),
+                "retry_of": previous.id,
+                "previous_request": previous.request
+            });
+            let job = insert_platform_job(
+                state.db(),
+                job_id,
+                &previous.job_type,
+                &previous.target_type,
+                Some(target_id),
+                request,
+                &format!("queued retry {} job", previous.job_type),
+            )
+            .await?;
+            start_existing_platform_job(state, job_id).await?;
+            Ok(ok(job))
+        }
         other => Err(AppError::Validation(format!(
             "job type {other} does not support retry yet"
         ))),
     }
+}
+
+pub(crate) async fn start_existing_platform_job(
+    state: AppState,
+    job_id: Uuid,
+) -> Result<(), AppError> {
+    let job = get_platform_job(state.db(), job_id).await?;
+    let target_id = parse_job_target_uuid(&job)?;
+    match job.job_type.as_str() {
+        "appeal_standardization" => {
+            spawn_appeal_standardization_job(state, job_id, target_id);
+            Ok(())
+        }
+        "appeal_risk_case_agent_analyze" => {
+            spawn_appeal_agent_analyze_job(state, job_id, target_id);
+            Ok(())
+        }
+        "appeal_risk_case_graph_rebuild" => {
+            spawn_appeal_graph_rebuild_job(state, job_id, target_id);
+            Ok(())
+        }
+        "appeal_risk_case_vector_rebuild" => {
+            spawn_appeal_vector_rebuild_job(state, job_id, target_id);
+            Ok(())
+        }
+        "appeal_similar_case_discovery" => {
+            spawn_appeal_similar_discovery_job(state, job_id, target_id);
+            Ok(())
+        }
+        other => Err(AppError::Validation(format!(
+            "job type {other} does not support background start"
+        ))),
+    }
+}
+
+fn spawn_appeal_standardization_job(state: AppState, job_id: Uuid, appeal_id: Uuid) {
+    tokio::spawn(async move {
+        let started_at = Utc::now();
+        let _ = mark_platform_job_running(
+            state.db(),
+            job_id,
+            10,
+            "running labor appeal AI standardization",
+            started_at,
+        )
+        .await;
+
+        match appeal_standardization_service::standardize_appeal(&state, appeal_id).await {
+            Ok(row) => {
+                let _ = complete_platform_job(
+                    state.db(),
+                    job_id,
+                    Some(appeal_id),
+                    "completed",
+                    100,
+                    "appeal standardization completed",
+                    serde_json::json!({
+                        "appeal_id": appeal_id,
+                        "standardization_id": row.id,
+                        "status": row.status,
+                        "model_name": row.model_name,
+                        "prompt_version": row.prompt_version
+                    }),
+                )
+                .await;
+            }
+            Err(error) => {
+                let _ = fail_platform_job(state.db(), job_id, &app_error_message(&error)).await;
+            }
+        }
+    });
+}
+
+fn spawn_appeal_agent_analyze_job(state: AppState, job_id: Uuid, risk_case_id: Uuid) {
+    tokio::spawn(async move {
+        let started_at = Utc::now();
+        let _ = mark_platform_job_running(
+            state.db(),
+            job_id,
+            20,
+            "building risk case agent analysis from converted appeal",
+            started_at,
+        )
+        .await;
+
+        let result = async {
+            let detail = load_risk_case_detail(&state, risk_case_id).await?;
+            let intent = "risk_judgement".to_string();
+            let query = format!("分析风险案件 {}", detail.case_info.case_code);
+            let answer_markdown = build_agent_answer_markdown(&intent, &query, &detail);
+            let graph = build_agent_graph_payload(&detail);
+            Ok::<serde_json::Value, AppError>(serde_json::json!({
+                "risk_case_id": risk_case_id,
+                "case_code": detail.case_info.case_code,
+                "intent": intent,
+                "answer_markdown": answer_markdown,
+                "graph_node_count": graph.nodes.len(),
+                "graph_edge_count": graph.edges.len(),
+                "graph_sync_status": detail.case_info.graph_sync_status,
+                "vector_sync_status": detail.case_info.vector_sync_status
+            }))
+        }
+        .await;
+
+        match result {
+            Ok(result_json) => {
+                let _ = complete_platform_job(
+                    state.db(),
+                    job_id,
+                    Some(risk_case_id),
+                    "completed",
+                    100,
+                    "agent analysis generated from converted appeal risk case",
+                    result_json,
+                )
+                .await;
+            }
+            Err(error) => {
+                let _ = fail_platform_job(state.db(), job_id, &app_error_message(&error)).await;
+            }
+        }
+    });
+}
+
+fn spawn_appeal_graph_rebuild_job(state: AppState, job_id: Uuid, risk_case_id: Uuid) {
+    tokio::spawn(async move {
+        let started_at = Utc::now();
+        let _ = mark_platform_job_running(
+            state.db(),
+            job_id,
+            15,
+            "syncing converted appeal risk case graph",
+            started_at,
+        )
+        .await;
+
+        match rebuild_graph_case_inner(&state, risk_case_id).await {
+            Ok(response) if response.status == "failed" => {
+                let _ = fail_platform_job(state.db(), job_id, &response.message).await;
+            }
+            Ok(response) => {
+                let job_status = if response.status == "pending_extraction" {
+                    "completed_with_warnings"
+                } else {
+                    "completed"
+                };
+                let _ = complete_platform_job(
+                    state.db(),
+                    job_id,
+                    Some(risk_case_id),
+                    job_status,
+                    100,
+                    &response.message,
+                    serde_json::json!({
+                        "risk_case_id": risk_case_id,
+                        "status": response.status,
+                        "message": response.message,
+                        "updated_at": response.updated_at
+                    }),
+                )
+                .await;
+            }
+            Err(error) => {
+                let _ = fail_platform_job(state.db(), job_id, &app_error_message(&error)).await;
+            }
+        }
+    });
+}
+
+fn spawn_appeal_vector_rebuild_job(state: AppState, job_id: Uuid, risk_case_id: Uuid) {
+    tokio::spawn(async move {
+        let started_at = Utc::now();
+        let _ = mark_platform_job_running(
+            state.db(),
+            job_id,
+            15,
+            "indexing converted appeal risk case vector",
+            started_at,
+        )
+        .await;
+
+        match rebuild_case_vector_inner(&state, risk_case_id).await {
+            Ok(response) => {
+                let job_status = if response.status == "indexed" {
+                    "completed"
+                } else {
+                    "completed_with_warnings"
+                };
+                let _ = complete_platform_job(
+                    state.db(),
+                    job_id,
+                    Some(risk_case_id),
+                    job_status,
+                    100,
+                    &response.message,
+                    serde_json::json!({
+                        "risk_case_id": risk_case_id,
+                        "case_code": response.case_code,
+                        "status": response.status,
+                        "embedding_dimension": response.embedding_dimension,
+                        "model_contract": response.model_contract,
+                        "updated_at": response.updated_at
+                    }),
+                )
+                .await;
+            }
+            Err(error) => {
+                let _ = fail_platform_job(state.db(), job_id, &app_error_message(&error)).await;
+            }
+        }
+    });
+}
+
+fn spawn_appeal_similar_discovery_job(state: AppState, job_id: Uuid, appeal_id: Uuid) {
+    tokio::spawn(async move {
+        let started_at = Utc::now();
+        let _ = mark_platform_job_running(
+            state.db(),
+            job_id,
+            20,
+            "discovering similar risk cases for labor appeal",
+            started_at,
+        )
+        .await;
+
+        match discover_similar_cases_for_appeal(state.db(), appeal_id, 10).await {
+            Ok(result_json) => {
+                let _ = complete_platform_job(
+                    state.db(),
+                    job_id,
+                    Some(appeal_id),
+                    "completed",
+                    100,
+                    "similar case discovery completed",
+                    result_json,
+                )
+                .await;
+            }
+            Err(error) => {
+                let _ = fail_platform_job(state.db(), job_id, &app_error_message(&error)).await;
+            }
+        }
+    });
+}
+
+async fn discover_similar_cases_for_appeal(
+    db: &sqlx::PgPool,
+    appeal_id: Uuid,
+    limit: i64,
+) -> Result<serde_json::Value, AppError> {
+    let risk_case_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT risk_case_id
+        FROM appeal_risk_case_links
+        WHERE appeal_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(appeal_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or(AppError::NotFound)?;
+
+    let items = sqlx::query_as::<_, (Uuid, String, String, String, String, f64, String, f64, i64)>(
+        r#"
+        WITH source_case AS (
+            SELECT id, area_name, risk_level, risk_tags
+            FROM risk_cases
+            WHERE id = $1
+        ),
+        source_tags AS (
+            SELECT DISTINCT trim(tag) AS tag
+            FROM source_case,
+                 regexp_split_to_table(COALESCE(source_case.risk_tags, ''), '[,，、\s]+') AS tag
+            WHERE trim(tag) <> ''
+        ),
+        candidates AS (
+            SELECT rc.id, rc.case_code, rc.title, rc.area_name, rc.risk_level,
+                   rc.risk_score, rc.status,
+                   COUNT(st.tag)::BIGINT AS matching_tags,
+                   CASE WHEN rc.area_name = sc.area_name THEN 0.20::DOUBLE PRECISION ELSE 0::DOUBLE PRECISION END AS area_score,
+                   CASE WHEN rc.risk_level = sc.risk_level THEN 0.10::DOUBLE PRECISION ELSE 0::DOUBLE PRECISION END AS level_score
+            FROM risk_cases rc
+            CROSS JOIN source_case sc
+            LEFT JOIN source_tags st ON rc.risk_tags ILIKE ('%' || st.tag || '%')
+            WHERE rc.id <> sc.id
+            GROUP BY rc.id, rc.case_code, rc.title, rc.area_name, rc.risk_level,
+                     rc.risk_score, rc.status, sc.area_name, sc.risk_level
+        )
+        SELECT id, case_code, title, area_name, risk_level, risk_score, status,
+               LEAST(0.99::DOUBLE PRECISION, 0.35::DOUBLE PRECISION + (matching_tags::DOUBLE PRECISION * 0.12::DOUBLE PRECISION) + area_score + level_score) AS match_score,
+               matching_tags
+        FROM candidates
+        WHERE matching_tags > 0 OR area_score > 0 OR level_score > 0
+        ORDER BY match_score DESC, risk_score DESC, case_code ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(risk_case_id)
+    .bind(limit.clamp(1, 20))
+    .fetch_all(db)
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(serde_json::json!({
+        "appeal_id": appeal_id,
+        "risk_case_id": risk_case_id,
+        "items": items
+            .into_iter()
+            .map(|item| serde_json::json!({
+                "id": item.0,
+                "case_code": item.1,
+                "title": item.2,
+                "area_name": item.3,
+                "risk_level": item.4,
+                "risk_score": item.5,
+                "status": item.6,
+                "match_score": item.7,
+                "matching_tags": item.8
+            }))
+            .collect::<Vec<_>>()
+    }))
 }
 
 async fn report_summary(

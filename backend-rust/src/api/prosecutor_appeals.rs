@@ -10,6 +10,7 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::{
+    api::platform,
     app::AppState,
     domain::appeal_status,
     services::{
@@ -43,7 +44,10 @@ pub fn routes() -> Router<AppState> {
             "/prosecutor/appeals/:id/convert-risk-case",
             post(convert_risk_case),
         )
-        .route("/prosecutor/appeals/:id/link-risk-case", post(link_risk_case))
+        .route(
+            "/prosecutor/appeals/:id/link-risk-case",
+            post(link_risk_case),
+        )
         .route("/prosecutor/appeals/:id/resolve", post(resolve))
         .route(
             "/prosecutor/appeals/:id/location/confirm",
@@ -456,12 +460,14 @@ async fn request_materials(
     appeal_status::ensure_request_materials_allowed(&appeal.status)?;
     let materials = input.request_materials.join("\n");
     let mut tx = state.db().begin().await.map_err(|_| AppError::Internal)?;
-    sqlx::query("UPDATE labor_appeals SET status = 'material_requested', updated_at = $2 WHERE id = $1")
-        .bind(id)
-        .bind(Utc::now())
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| AppError::Internal)?;
+    sqlx::query(
+        "UPDATE labor_appeals SET status = 'material_requested', updated_at = $2 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(Utc::now())
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
     appeal_service::insert_review_action_tx(
         &mut tx,
         id,
@@ -570,9 +576,12 @@ async fn convert_risk_case(
     ensure_staff_allowed(&headers)?;
     ensure_staff_area_access(state.db(), &headers, id).await?;
     let staff_id = staff_id(&headers);
-    Ok(ok(
-        appeal_conversion_service::convert_to_risk_case(state.db(), id, &staff_id, input).await?,
-    ))
+    let result =
+        appeal_conversion_service::convert_to_risk_case(state.db(), id, &staff_id, input).await?;
+    for job in &result.triggered_jobs {
+        platform::start_existing_platform_job(state.clone(), job.id).await?;
+    }
+    Ok(ok(result))
 }
 
 async fn link_risk_case(
@@ -584,9 +593,13 @@ async fn link_risk_case(
     ensure_staff_allowed(&headers)?;
     ensure_staff_area_access(state.db(), &headers, id).await?;
     let staff_id = staff_id(&headers);
-    Ok(ok(
-        appeal_conversion_service::link_existing_risk_case(state.db(), id, &staff_id, input).await?,
-    ))
+    Ok(ok(appeal_conversion_service::link_existing_risk_case(
+        state.db(),
+        id,
+        &staff_id,
+        input,
+    )
+    .await?))
 }
 
 async fn resolve(
@@ -743,7 +756,10 @@ fn available_actions(status: &str) -> Vec<&'static str> {
     if matches!(status, "accepted" | "under_review" | "transferred") {
         actions.push("start_processing");
     }
-    if matches!(status, "accepted" | "processing" | "under_review" | "transferred") {
+    if matches!(
+        status,
+        "accepted" | "processing" | "under_review" | "transferred"
+    ) {
         actions.push("convert_risk_case");
         actions.push("resolve");
     }
