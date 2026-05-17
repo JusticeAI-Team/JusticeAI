@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use axum::{
     async_trait,
@@ -8,7 +8,7 @@ use axum::{
     },
 };
 use chrono::{DateTime, Datelike, Utc};
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::{
@@ -44,10 +44,23 @@ pub struct MaterialUploadPayload {
     pub bytes: Vec<u8>,
 }
 
+pub struct MaterialDownload {
+    pub original_filename: String,
+    pub mime_type: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
 struct StorageTarget {
     stored_filename: String,
     relative_path: String,
     absolute_path: PathBuf,
+}
+
+#[derive(Debug, FromRow)]
+struct MaterialFileRecord {
+    original_filename: String,
+    stored_path: String,
+    mime_type: Option<String>,
 }
 
 pub async fn read_material_upload(mut multipart: Multipart) -> Result<MaterialUploadPayload, AppError> {
@@ -214,6 +227,81 @@ pub async fn delete_material(
     tx.commit().await.map_err(|_| AppError::Internal)?;
     appeal_service::recompute_score(db, appeal_id).await?;
     Ok(material)
+}
+
+pub async fn download_material_for_applicant(
+    db: &PgPool,
+    upload_dir: &str,
+    applicant_id: Uuid,
+    appeal_id: Uuid,
+    material_id: Uuid,
+) -> Result<MaterialDownload, AppError> {
+    appeal_service::ensure_appeal_owner_if_needed(db, appeal_id, Some(applicant_id)).await?;
+    load_material_file(db, upload_dir, appeal_id, material_id).await
+}
+
+pub async fn download_material_for_staff(
+    db: &PgPool,
+    upload_dir: &str,
+    staff_id: &str,
+    appeal_id: Uuid,
+    material_id: Uuid,
+) -> Result<MaterialDownload, AppError> {
+    appeal_service::get_appeal(db, appeal_id).await?;
+    let material = load_material_file(db, upload_dir, appeal_id, material_id).await?;
+    let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
+    appeal_service::insert_event_tx(
+        &mut tx,
+        appeal_id,
+        "material_downloaded",
+        "staff",
+        staff_id,
+        "下载材料",
+        "工作人员下载了申诉材料",
+        false,
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AppError::Internal)?;
+    Ok(material)
+}
+
+async fn load_material_file(
+    db: &PgPool,
+    upload_dir: &str,
+    appeal_id: Uuid,
+    material_id: Uuid,
+) -> Result<MaterialDownload, AppError> {
+    let record = sqlx::query_as::<_, MaterialFileRecord>(
+        r#"
+        SELECT original_filename, stored_path, mime_type
+        FROM appeal_materials
+        WHERE id = $1 AND appeal_id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(material_id)
+    .bind(appeal_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or(AppError::NotFound)?;
+
+    let relative_path = Path::new(&record.stored_path);
+    if relative_path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(AppError::Internal);
+    }
+
+    let absolute_path = Path::new(upload_dir).join(relative_path);
+    let bytes = std::fs::read(absolute_path).map_err(|_| AppError::NotFound)?;
+    Ok(MaterialDownload {
+        original_filename: record.original_filename,
+        mime_type: record.mime_type,
+        bytes,
+    })
 }
 
 fn build_storage_target(upload_dir: &str, extension: &str, now: DateTime<Utc>) -> StorageTarget {

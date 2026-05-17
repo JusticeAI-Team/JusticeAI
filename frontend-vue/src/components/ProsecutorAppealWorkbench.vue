@@ -200,6 +200,7 @@
                 <span class="ok"></span>
                 <strong>{{ materialLabel(item.category) }}</strong>
                 <em>{{ item.original_filename }}</em>
+                <button @click="downloadMaterial(item)">下载</button>
               </div>
               <p v-if="detail.materials.length === 0">申请人尚未上传材料。</p>
             </article>
@@ -309,7 +310,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import * as echarts from 'echarts'
 import tongzhouGeoJson from '../assets/maps/tongzhou.json'
-import { apiGet, apiPost } from '../api/platform'
+import { apiDownloadUrl, apiGet, apiPost } from '../api/platform'
 
 const STAFF_HEADERS = { 'X-Staff-Id': 'dev-staff', 'X-Staff-Role': 'prosecutor' }
 
@@ -497,6 +498,11 @@ const materialLabel = (category) => ({
   coworker_statement: '工友证明',
   other: '其他材料'
 }[category] || category)
+
+const downloadMaterial = (item) => {
+  if (!activeId.value || !item?.id) return
+  window.open(apiDownloadUrl(`/prosecutor/appeals/${activeId.value}/materials/${item.id}/download`), '_blank', 'noopener')
+}
 
 const formatTime = (value) => value ? new Date(value).toLocaleString('zh-CN') : ''
 

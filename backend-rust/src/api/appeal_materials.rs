@@ -1,7 +1,8 @@
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
-    http::HeaderMap,
-    routing::{delete, post},
+    http::{header, HeaderMap, HeaderValue},
+    response::IntoResponse,
+    routing::{delete, get, post},
     Json, Router,
 };
 use uuid::Uuid;
@@ -26,6 +27,14 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/mobile/appeals/:id/materials/:material_id",
             delete(delete_material),
+        )
+        .route(
+            "/mobile/appeals/:id/materials/:material_id/download",
+            get(download_mobile_material),
+        )
+        .route(
+            "/prosecutor/appeals/:id/materials/:material_id/download",
+            get(download_prosecutor_material),
         )
         .layer(DefaultBodyLimit::max(MAX_APPEAL_UPLOAD_FILE_BYTES + 1024 * 1024))
 }
@@ -61,6 +70,40 @@ async fn delete_material(
     ))
 }
 
+async fn download_mobile_material(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, material_id)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, AppError> {
+    let applicant_id = applicant_id(&headers)?;
+    let material = appeal_material_service::download_material_for_applicant(
+        state.db(),
+        &state.settings().storage.upload_dir,
+        applicant_id,
+        id,
+        material_id,
+    )
+    .await?;
+    material_download_response(material)
+}
+
+async fn download_prosecutor_material(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, material_id)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, AppError> {
+    let staff_id = staff_id(&headers);
+    let material = appeal_material_service::download_material_for_staff(
+        state.db(),
+        &state.settings().storage.upload_dir,
+        &staff_id,
+        id,
+        material_id,
+    )
+    .await?;
+    material_download_response(material)
+}
+
 fn applicant_id(headers: &HeaderMap) -> Result<Uuid, AppError> {
     headers
         .get("x-mobile-applicant-id")
@@ -70,4 +113,45 @@ fn applicant_id(headers: &HeaderMap) -> Result<Uuid, AppError> {
         .map_err(|_| AppError::Unauthorized)?
         .map(Ok)
         .unwrap_or(Ok(DEV_APPLICANT_ID))
+}
+
+fn staff_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-staff-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("dev-staff")
+        .to_string()
+}
+
+fn material_download_response(
+    material: appeal_material_service::MaterialDownload,
+) -> Result<impl IntoResponse, AppError> {
+    let mut headers = HeaderMap::new();
+    let mime_type = material
+        .mime_type
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("application/octet-stream");
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime_type).map_err(|_| AppError::Internal)?,
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"{}\"",
+            ascii_download_filename(&material.original_filename)
+        ))
+        .map_err(|_| AppError::Internal)?,
+    );
+    Ok((headers, material.bytes))
+}
+
+fn ascii_download_filename(original: &str) -> String {
+    let extension = std::path::Path::new(original)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("bin");
+    format!("appeal-material.{extension}")
 }
