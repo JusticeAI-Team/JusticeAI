@@ -132,17 +132,22 @@
                 <strong>补充材料</strong>
                 <em>{{ materials.length }} 份已上传</em>
               </header>
-              <button
+              <label
                 v-for="item in materialDefs"
                 :key="item.category"
                 class="evidence-row"
                 :class="{ uploaded: hasMaterial(item.category) }"
-                @click="uploadSampleMaterial(item)"
               >
+                <input
+                  class="file-input"
+                  type="file"
+                  :accept="materialAccept"
+                  @change="uploadMaterialFile($event, item)"
+                />
                 <span class="doc-icon">{{ hasMaterial(item.category) ? '✓' : '需' }}</span>
                 <span><strong>{{ item.label }}</strong><small>{{ item.tip }}</small></span>
-                <em>{{ hasMaterial(item.category) ? '已补' : '上传' }}</em>
-              </button>
+                <em>{{ hasMaterial(item.category) ? '继续上传' : '上传' }}</em>
+              </label>
             </template>
 
             <template v-else-if="step.id === 'submit'">
@@ -268,6 +273,7 @@ const materialDefs = [
   { category: 'identity', label: '身份信息', tip: '便于工作人员联系核实' }
 ]
 
+const materialAccept = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv'
 const activeStep = computed(() => steps[stepIndex.value])
 const visibleSteps = computed(() => steps.slice(0, stepIndex.value + 1))
 const progressPercent = computed(() => Math.round(((stepIndex.value + 1) / steps.length) * 100))
@@ -277,7 +283,7 @@ const missingMaterialsText = computed(() => currentAppeal.value?.missing_materia
 const nextLabel = computed(() => {
   if (activeStep.value.id === 'messages') return '开始申诉'
   if (activeStep.value.id === 'map') return '保存定位'
-  if (activeStep.value.id === 'materials') return '材料不完整先提交'
+  if (activeStep.value.id === 'materials') return '继续提交确认'
   if (activeStep.value.id === 'submit') return '提交线索'
   if (activeStep.value.id === 'cases') return '查看进度'
   if (activeStep.value.id === 'progress') return '刷新进度'
@@ -336,13 +342,14 @@ const saveLocation = async () => {
   }
 }
 
-const uploadSampleMaterial = async (item) => {
-  if (hasMaterial(item.category)) return
+const uploadMaterialFile = async (event, item) => {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file) return
   busy.value = true
   try {
     const appeal = await ensureDraft()
     const formData = new FormData()
-    const file = new File([`${item.label}示例材料`], `${item.category}.txt`, { type: 'text/plain' })
     formData.append('file', file)
     formData.append('category', item.category)
     formData.append('description', item.tip)
@@ -624,6 +631,20 @@ textarea {
   border-radius: 8px;
   padding: 11px;
   margin-top: 8px;
+}
+
+.evidence-row {
+  cursor: pointer;
+  box-sizing: border-box;
+  position: relative;
+}
+
+.file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .message-row.unread .message-dot {

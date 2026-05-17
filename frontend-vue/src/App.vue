@@ -45,7 +45,7 @@
         </el-menu-item>
         <el-menu-item index="8">
           <i class="el-icon-video-play"></i>
-          <span>全流程演示</span>
+          <span>全流程闭环</span>
         </el-menu-item>
       </el-menu>
       
@@ -124,7 +124,7 @@ const handleMenuSelect = (index) => {
 
 const handleUserCommand = (command) => {
   if (command === 'logout') {
-    ElMessage.warning('当前为内网演示终端，退出动作已记录但未接入统一认证。')
+    ElMessage.warning('当前为内网工作终端，退出动作已记录但未接入统一认证。')
     return
   }
   activeMenu.value = command

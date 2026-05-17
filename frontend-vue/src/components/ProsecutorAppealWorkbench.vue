@@ -358,6 +358,26 @@ const standardConflicts = computed(() => Array.isArray(standardization.value?.co
 const standardEvidence = computed(() => standardization.value?.evidence_assessment || {})
 const standardRiskMapping = computed(() => standardization.value?.risk_case_mapping || {})
 
+const mapPointData = () => appeals.value
+  .filter((item) => Number.isFinite(Number(item.longitude)) && Number.isFinite(Number(item.latitude)))
+  .map((item) => {
+    const isSupplementNeeded = ['submitted_incomplete', 'material_requested'].includes(item.status)
+    const color = isSupplementNeeded ? '#f59e0b' : item.material_score >= 75 ? '#ef4444' : '#2563eb'
+    return {
+      name: item.project_name || item.address_text || item.appeal_code,
+      value: [Number(item.longitude), Number(item.latitude)],
+      symbolSize: item.material_score >= 75 ? 15 : isSupplementNeeded ? 12 : 9,
+      itemStyle: { color }
+    }
+  })
+
+const updateMapPoints = () => {
+  if (!mapIns) return
+  mapIns.setOption({
+    series: [{ data: mapPointData() }]
+  })
+}
+
 const loadAppeals = async () => {
   const params = new URLSearchParams({ page: '1', page_size: '50' })
   if (keyword.value) params.set('keyword', keyword.value)
@@ -365,6 +385,7 @@ const loadAppeals = async () => {
   const data = await apiGet(`/prosecutor/appeals?${params.toString()}`, { headers: STAFF_HEADERS })
   appeals.value = data.items || []
   total.value = data.total || appeals.value.length
+  updateMapPoints()
   if (!detail.value && appeals.value[0]) await openDetail(appeals.value[0].id)
 }
 
@@ -525,11 +546,7 @@ const initMap = async () => {
       type: 'effectScatter',
       coordinateSystem: 'geo',
       rippleEffect: { scale: 3.2, brushType: 'stroke' },
-      data: [
-        { name: '欠薪高关注', value: [116.656, 39.909], symbolSize: 15, itemStyle: { color: '#ef4444' } },
-        { name: '材料待补线索', value: [116.684, 39.807], symbolSize: 11, itemStyle: { color: '#f59e0b' } },
-        { name: '普通诉求定位点', value: [116.735, 39.88], symbolSize: 9, itemStyle: { color: '#2563eb' } }
-      ]
+      data: mapPointData()
     }]
   })
 }

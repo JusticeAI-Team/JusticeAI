@@ -28,6 +28,8 @@ pub struct AppealStandardizationRow {
     pub model_name: String,
     pub prompt_version: String,
     pub input_digest: String,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     pub input_snapshot: serde_json::Value,
     pub output_json: serde_json::Value,
     pub standardized_title: String,

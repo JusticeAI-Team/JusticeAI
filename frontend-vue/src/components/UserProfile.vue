@@ -5,7 +5,7 @@
         <div class="kicker">PROSECUTOR TERMINAL</div>
         <h2>个人中心</h2>
       </div>
-      <div class="terminal-chip">TEST-USER / 内网演示账号</div>
+      <div class="terminal-chip">TEST-USER / 内网账号</div>
     </header>
 
     <main class="profile-grid">
@@ -34,7 +34,7 @@
           <div><span>账号标识</span><strong>prosecutor.test</strong></div>
           <div><span>所属单位</span><strong>北京市通州区人民检察院</strong></div>
           <div><span>当前角色</span><strong>业务研判 / 系统调试</strong></div>
-          <div><span>认证状态</span><strong class="green">本地演示终端</strong></div>
+          <div><span>认证状态</span><strong class="green">本地工作终端</strong></div>
         </div>
       </section>
 

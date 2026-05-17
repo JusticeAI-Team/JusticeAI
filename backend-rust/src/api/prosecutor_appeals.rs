@@ -90,6 +90,8 @@ struct AppealListRow {
     area_code: Option<String>,
     area_name: Option<String>,
     address_text: Option<String>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
     submitted_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
 }
@@ -109,6 +111,8 @@ struct AppealListItem {
     area_code: Option<String>,
     area_name: Option<String>,
     address_text: Option<String>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
     submitted_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
 }
@@ -224,7 +228,7 @@ async fn list_appeals(
         SELECT la.id, la.appeal_code, la.status, la.risk_case_status,
                la.worker_name, la.worker_phone, la.project_name, la.wage_amount_text,
                la.material_score, la.missing_materials, al.area_code, al.area_name,
-               al.address_text, la.submitted_at, la.updated_at
+               al.address_text, al.latitude, al.longitude, la.submitted_at, la.updated_at
         FROM labor_appeals la
         LEFT JOIN appeal_locations al ON al.appeal_id = la.id
         WHERE la.status <> 'draft'
@@ -721,6 +725,8 @@ fn mask_list_row(row: AppealListRow) -> AppealListItem {
         area_code: row.area_code,
         area_name: row.area_name,
         address_text: row.address_text,
+        latitude: row.latitude,
+        longitude: row.longitude,
         submitted_at: row.submitted_at,
         updated_at: row.updated_at,
     }

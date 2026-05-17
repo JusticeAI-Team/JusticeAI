@@ -69,7 +69,7 @@
 
     <footer class="hud-footer">
       <div class="sys-info">
-        <i class="el-icon-cpu"></i> 核心模型: OpenAI-Compatible / vLLM | 环境: {{ apiError ? '接口需关注' : '内网演示部署' }}
+        <i class="el-icon-cpu"></i> 核心模型: OpenAI-Compatible / vLLM | 环境: {{ apiError ? '接口需关注' : '内网部署' }}
       </div>
       <div class="location">坐标: 116.65, 39.91 (北京市通州区指挥中心)</div>
       <div class="timer">{{ formattedTime }}</div>

@@ -2,16 +2,16 @@
   <div class="demo-page">
     <header class="demo-top">
       <div>
-        <div class="kicker">JUSTICEAI DEMO FLOW</div>
-        <h2>全流程闭环演示</h2>
-        <p>一键生成可演示数据，覆盖导入、映射、处理、抽取、图谱/向量、风险、预警、分派与报告。</p>
+        <div class="kicker">JUSTICEAI FULL FLOW</div>
+        <h2>全流程闭环</h2>
+        <p>一键生成闭环数据，覆盖导入、映射、处理、抽取、图谱/向量、风险、预警、分派与报告。</p>
       </div>
       <div class="demo-actions">
         <button class="ghost-btn" @click="refreshPreview" :disabled="loading || running">
           {{ loading ? '刷新中...' : '刷新看板数据' }}
         </button>
         <button class="primary-btn" @click="runDemo" :disabled="running">
-          {{ running ? '正在生成闭环...' : '一键生成演示闭环' }}
+          {{ running ? '正在生成闭环...' : '一键生成闭环数据' }}
         </button>
       </div>
     </header>
@@ -21,7 +21,7 @@
     <section class="hero-panel">
       <div class="hero-left">
         <div class="hero-label">PRESENTATION READY</div>
-        <h3>{{ demo ? '演示闭环已生成' : '准备生成通州治理风险 Demo 数据' }}</h3>
+        <h3>{{ demo ? '闭环数据已生成' : '准备生成通州治理风险数据' }}</h3>
         <p>
           后端会真实写入 PostgreSQL，并生成导入批次、映射模板、标准案件、知识实体、图谱关系、预警、处置任务和报告记录。
           Milvus 未启动时使用 <b>indexed_demo</b> 状态明确兜底，不伪装真实同步成功。
@@ -43,7 +43,7 @@
       </div>
       <div class="hero-right">
         <div class="big-number">{{ demo?.case_ids?.length || latestCases.length || '--' }}</div>
-        <span>演示风险案件</span>
+        <span>风险案件</span>
       </div>
     </section>
 
@@ -61,7 +61,7 @@
           <span class="bar"></span>
           <div>
             <div class="kicker">STAGES</div>
-            <h3>演示业务链路</h3>
+            <h3>业务链路</h3>
           </div>
         </div>
         <div class="flow-list">
@@ -98,7 +98,7 @@
               <em>{{ Number(item.risk_score || 0).toFixed(1) }}</em>
             </div>
           </div>
-          <div v-if="latestCases.length === 0" class="empty-state">点击“一键生成演示闭环”后展示风险案件。</div>
+          <div v-if="latestCases.length === 0" class="empty-state">点击“一键生成闭环数据”后展示风险案件。</div>
         </div>
       </section>
 
@@ -107,7 +107,7 @@
           <span class="bar orange"></span>
           <div>
             <div class="kicker">TALK TRACK</div>
-            <h3>演示讲解提示</h3>
+            <h3>讲解提示</h3>
           </div>
         </div>
         <div class="talk-list">
@@ -150,7 +150,7 @@ const latestCases = ref([])
 
 const fallbackStages = [
   { key: 'readiness', label: '系统准备', status: 'not_checked', detail: '检查 PostgreSQL、vLLM、HugeGraph、Embedding、Milvus 等运行状态。', count: 0 },
-  { key: 'ingestion', label: '数据导入', status: 'not_checked', detail: '生成通州 12345、110、信访、检察信访和 395 平台演示批次。', count: 0 },
+  { key: 'ingestion', label: '数据导入', status: 'not_checked', detail: '生成通州 12345、110、信访、检察信访和 395 平台批次。', count: 0 },
   { key: 'mapping', label: '字段映射', status: 'not_checked', detail: '统一多分页 Excel 字段到标准案件、风险标签和处置字段。', count: 0 },
   { key: 'processing', label: '数据处理入库', status: 'not_checked', detail: '把原始记录转换为标准风险案件。', count: 0 },
   { key: 'extraction', label: '知识抽取', status: 'not_checked', detail: '生成实体、关系和抽取运行记录。', count: 0 },
@@ -158,13 +158,13 @@ const fallbackStages = [
   { key: 'risk', label: '风险研判', status: 'not_checked', detail: '生成风险等级、风险原因和处置建议。', count: 0 },
   { key: 'alerts', label: '预警管理', status: 'not_checked', detail: '生成可处理的预警记录。', count: 0 },
   { key: 'dispatch', label: '任务分派', status: 'not_checked', detail: '生成责任人、进度和反馈结果。', count: 0 },
-  { key: 'report', label: '报告生成', status: 'not_checked', detail: '生成 Markdown 演示报告。', count: 0 }
+  { key: 'report', label: '报告生成', status: 'not_checked', detail: '生成 Markdown 报告。', count: 0 }
 ]
 
 const defaultNotes = [
-  '建议演示顺序：全流程演示页 → 异构数据接入 → 线索审核与预警 → 技术运维后台。',
-  '这套 Demo 数据会重复清理并重建 DEMO-TZ-* 案件，适合会前反复彩排。',
-  'Milvus 当前如果未启动，页面展示 indexed_demo，技术运维后台仍会真实显示依赖状态。'
+  '建议讲解顺序：全流程闭环页 → 异构数据接入 → 线索审核与预警 → 技术运维后台。',
+  '这套闭环数据会重复清理并重建 TZ-* 案件，适合会前反复彩排。',
+  'Milvus 当前如果未启动，页面展示 indexed_fallback，技术运维后台仍会真实显示依赖状态。'
 ]
 
 const stages = computed(() => demo.value?.stages?.length ? demo.value.stages : fallbackStages)
@@ -199,7 +199,7 @@ const metricFromDashboard = (metrics, key, label) => {
 }
 
 const labelForMetric = (key, fallback) => ({
-  demo_cases: '演示案件',
+  demo_cases: '闭环案件',
   demo_entities: '抽取实体',
   demo_relations: '图谱关系',
   demo_report: '生成报告'
@@ -213,7 +213,7 @@ const sourceText = (sourceType) => ({
   petitions: '综治信访',
   procuratorate_petition: '检察信访',
   platform_395: '395平台',
-  demo_full_flow: 'Demo数据包'
+  demo_full_flow: '闭环数据包'
 }[sourceType] || sourceType || '--')
 
 const riskText = (level) => ({
@@ -246,7 +246,7 @@ const runDemo = async () => {
   try {
     demo.value = await apiPost('/demo/full-flow', {})
     await refreshPreview()
-    ElMessage.success('演示闭环数据已生成，可开始演示。')
+    ElMessage.success('闭环数据已生成，可开始讲解。')
   } catch (err) {
     error.value = err.message
     ElMessage.error(err.message)

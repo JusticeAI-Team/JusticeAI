@@ -60,9 +60,13 @@ pub struct AppealMaterialRow {
     pub category: String,
     pub description: String,
     pub original_filename: String,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     pub stored_filename: String,
     pub file_size: i64,
     pub mime_type: Option<String>,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     pub deleted_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
