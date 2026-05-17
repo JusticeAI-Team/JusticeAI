@@ -740,10 +740,10 @@ fn available_actions(status: &str) -> Vec<&'static str> {
     if appeal_status::ensure_accept_allowed(status).is_ok() {
         actions.push("accept");
     }
-    if matches!(status, "accepted" | "under_review") {
+    if matches!(status, "accepted" | "under_review" | "transferred") {
         actions.push("start_processing");
     }
-    if matches!(status, "accepted" | "processing" | "under_review") {
+    if matches!(status, "accepted" | "processing" | "under_review" | "transferred") {
         actions.push("convert_risk_case");
         actions.push("resolve");
     }

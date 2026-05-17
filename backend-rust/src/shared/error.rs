@@ -10,6 +10,7 @@ pub enum AppError {
     Internal,
     NotFound,
     Validation(String),
+    Conflict(String),
     #[allow(dead_code)]
     DependencyUnavailable(String),
     #[allow(dead_code)]
@@ -32,6 +33,7 @@ impl AppError {
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Validation(_) => StatusCode::BAD_REQUEST,
+            Self::Conflict(_) => StatusCode::CONFLICT,
             Self::DependencyUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
@@ -43,6 +45,7 @@ impl AppError {
             Self::Internal => "INTERNAL_ERROR",
             Self::NotFound => "NOT_FOUND",
             Self::Validation(_) => "VALIDATION_ERROR",
+            Self::Conflict(_) => "CONFLICT",
             Self::DependencyUnavailable(_) => "DEPENDENCY_UNAVAILABLE",
             Self::Unauthorized => "UNAUTHORIZED",
             Self::Forbidden => "FORBIDDEN",
@@ -54,6 +57,7 @@ impl AppError {
             Self::Internal => "服务器内部错误".to_string(),
             Self::NotFound => "资源不存在".to_string(),
             Self::Validation(message) => message.clone(),
+            Self::Conflict(message) => message.clone(),
             Self::DependencyUnavailable(_) => "依赖服务不可用".to_string(),
             Self::Unauthorized => "未授权访问".to_string(),
             Self::Forbidden => "禁止访问".to_string(),
@@ -63,6 +67,7 @@ impl AppError {
     fn details(&self) -> Option<String> {
         match self {
             Self::Validation(message) => Some(message.clone()),
+            Self::Conflict(message) => Some(message.clone()),
             Self::DependencyUnavailable(message) => Some(message.clone()),
             _ => None,
         }

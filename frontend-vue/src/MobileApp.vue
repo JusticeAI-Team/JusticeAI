@@ -432,10 +432,12 @@ const statusText = (status) => {
   const map = {
     draft: '草稿',
     submitted: '已提交',
+    standardizing: '智能整理中',
     submitted_incomplete: '材料不完整已提交',
     under_review: '复核中',
     material_requested: '待补证',
     accepted: '已接收',
+    transferred: '已转办',
     processing: '办理中',
     resolved: '已办结',
     closed: '已关闭',

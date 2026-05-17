@@ -99,3 +99,65 @@ pub fn calculate_material_score(input: &AppealScoreInput) -> AppealScore {
         missing_materials: missing,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_input() -> AppealScoreInput {
+        AppealScoreInput {
+            oral_description: "老板拖欠三个月工资".to_string(),
+            worker_name: "张三".to_string(),
+            worker_phone: "13800001234".to_string(),
+            project_name: "北京市XX区XX地点项目".to_string(),
+            employer_name: String::new(),
+            contractor_name: "李某".to_string(),
+            wage_amount_text: "大概三万二".to_string(),
+            area_name: Some("北京市XX区".to_string()),
+            material_categories: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn complete_material_chain_scores_full_100() {
+        let mut input = base_input();
+        input.material_categories = vec!["wage_record".to_string(), "chat_record".to_string()];
+        let score = calculate_material_score(&input);
+        assert_eq!(score.score, 100);
+        assert!(score.missing_materials.is_empty());
+    }
+
+    #[test]
+    fn incomplete_material_chain_stays_below_submit_threshold() {
+        let input = AppealScoreInput {
+            oral_description: "老板欠工资".to_string(),
+            worker_name: "张三".to_string(),
+            worker_phone: "13800001234".to_string(),
+            project_name: String::new(),
+            employer_name: String::new(),
+            contractor_name: String::new(),
+            wage_amount_text: String::new(),
+            area_name: None,
+            material_categories: Vec::new(),
+        };
+        let score = calculate_material_score(&input);
+        assert_eq!(score.score, 35);
+        assert!(score.score < 60);
+        assert!(score.missing_materials.contains(&"项目或地点信息".to_string()));
+        assert!(score
+            .missing_materials
+            .contains(&"劳动合同、工资记录、考勤或银行流水之一".to_string()));
+    }
+
+    #[test]
+    fn area_name_counts_as_project_or_location_information() {
+        let mut input = base_input();
+        input.project_name.clear();
+        input.employer_name.clear();
+        input.contractor_name.clear();
+        input.material_categories = vec!["attendance".to_string()];
+        let score = calculate_material_score(&input);
+        assert_eq!(score.score, 90);
+        assert!(!score.missing_materials.contains(&"项目或地点信息".to_string()));
+    }
+}

@@ -6007,6 +6007,7 @@ fn app_error_message(error: &AppError) -> String {
         AppError::Internal => "server internal error".to_string(),
         AppError::NotFound => "resource not found".to_string(),
         AppError::Validation(message) => message.clone(),
+        AppError::Conflict(message) => message.clone(),
         AppError::DependencyUnavailable(message) => {
             format!("dependency unavailable: {message}")
         }
