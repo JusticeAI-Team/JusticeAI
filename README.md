@@ -32,6 +32,7 @@ docker compose up --build -d
 启动后访问：
 
 - 前端：`http://127.0.0.1:18100`
+- 农民工移动端：`http://127.0.0.1:18101`
 - 后端：`http://127.0.0.1:8088`
 - 健康检查：`http://127.0.0.1:8088/api/health`
 
@@ -79,7 +80,13 @@ npm --prefix frontend-vue install
 npm --prefix frontend-vue run dev
 ```
 
-6. 打开前端页面后，先进入 `/setup` 检查后端状态，再进入 `/imports`
+6. 如需单独启动农民工移动端：
+
+```bash
+$env:VITE_APP_ENTRY='mobile'; $env:VITE_DEV_PORT='18101'; npm --prefix frontend-vue run dev:mobile
+```
+
+7. 打开前端页面后，先进入 `/setup` 检查后端状态，再进入 `/imports`
 
 ## 配置入口
 

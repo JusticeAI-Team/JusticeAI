@@ -17,29 +17,33 @@
       >
         <el-menu-item index="1">
           <i class="el-icon-data-board"></i>
-          <span>全景风险指挥大屏</span>
+          <span>农民工诉求闭环</span>
         </el-menu-item>
         <el-menu-item index="2">
+          <i class="el-icon-data-board"></i>
+          <span>通州风险地图</span>
+        </el-menu-item>
+        <el-menu-item index="3">
           <i class="el-icon-cpu"></i>
           <span>检察官智能工作台</span>
         </el-menu-item>
-        <el-menu-item index="3">
+        <el-menu-item index="4">
           <i class="el-icon-warning-outline"></i>
           <span>线索审核与预警</span>
         </el-menu-item>
-        <el-menu-item index="4">
+        <el-menu-item index="5">
           <i class="el-icon-document"></i>
           <span>文书辅助生成</span>
         </el-menu-item>
-        <el-menu-item index="5">
+        <el-menu-item index="6">
           <i class="el-icon-connection"></i>
           <span>异构数据接入</span>
         </el-menu-item>
-        <el-menu-item index="6">
+        <el-menu-item index="7">
           <i class="el-icon-monitor"></i>
           <span>技术运维后台</span>
         </el-menu-item>
-        <el-menu-item index="7">
+        <el-menu-item index="8">
           <i class="el-icon-video-play"></i>
           <span>全流程演示</span>
         </el-menu-item>
@@ -57,7 +61,7 @@
       <el-header class="hud-header">
         <div class="header-left">
           <span class="title-decorator"></span>
-          <span class="main-title">基层社会治理重点领域风险研判一体化平台</span>
+          <span class="main-title">基层社会治理重点领域风险研判一体化平台 · 农民工欠薪诉求闭环</span>
         </div>
         
         <div class="header-right">
@@ -81,15 +85,17 @@
       <!-- 3. 主体内容区：你之前改好的柔奶白页面会在这里渲染 -->
       <el-main class="hud-main">
         <div class="main-content-wrapper">
-          <AgentWorkspace v-if="activeMenu === '2'" />
-          <WarningCenter v-else-if="activeMenu === '3'" />
-          <DocumentAssistant v-else-if="activeMenu === '4'" />
-          <DataIntegration v-else-if="activeMenu === '5'" />
-          <TechOpsConsole v-else-if="activeMenu === '6'" />
-          <DemoFullFlow v-else-if="activeMenu === '7'" />
+          <ProsecutorAppealWorkbench v-if="activeMenu === '1'" />
+          <Dashboard v-else-if="activeMenu === '2'" />
+          <AgentWorkspace v-else-if="activeMenu === '3'" />
+          <WarningCenter v-else-if="activeMenu === '4'" />
+          <DocumentAssistant v-else-if="activeMenu === '5'" />
+          <DataIntegration v-else-if="activeMenu === '6'" />
+          <TechOpsConsole v-else-if="activeMenu === '7'" />
+          <DemoFullFlow v-else-if="activeMenu === '8'" />
           <UserProfile v-else-if="activeMenu === 'profile'" />
           <SystemSettings v-else-if="activeMenu === 'settings'" />
-          <Dashboard v-else />
+          <ProsecutorAppealWorkbench v-else />
         </div>
       </el-main>
     </el-container>
@@ -99,6 +105,7 @@
 <script setup>
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import ProsecutorAppealWorkbench from './components/ProsecutorAppealWorkbench.vue'
 import Dashboard from './components/Dashboard.vue'
 import AgentWorkspace from './components/AgentWorkspace.vue'
 import WarningCenter from './components/WarningCenter.vue'

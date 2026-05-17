@@ -10,7 +10,9 @@ use crate::{
 };
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/system/info", get(system_info))
+    Router::new()
+        .route("/system/info", get(system_info))
+        .route("/system/mobile-entry", get(mobile_entry))
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +100,25 @@ struct DataOverview {
     dispatch_tasks: i64,
     reports: i64,
     extraction_runs: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct MobileEntryResponse {
+    name: &'static str,
+    audience: &'static str,
+    purpose: &'static str,
+    local_url: &'static str,
+    docker_service: &'static str,
+    dev_command: &'static str,
+    backend_api_base: &'static str,
+    scenes: Vec<MobileScene>,
+}
+
+#[derive(Debug, Serialize)]
+struct MobileScene {
+    key: &'static str,
+    title: &'static str,
+    description: &'static str,
 }
 
 async fn system_info(State(state): State<AppState>) -> axum::Json<ApiResponse<SystemInfoResponse>> {
@@ -239,6 +260,35 @@ async fn system_info(State(state): State<AppState>) -> axum::Json<ApiResponse<Sy
             reports: scalar_count(state.db(), "SELECT COUNT(*) FROM generated_reports").await,
             extraction_runs: scalar_count(state.db(), "SELECT COUNT(*) FROM extraction_runs").await,
         },
+    })
+}
+
+async fn mobile_entry() -> axum::Json<ApiResponse<MobileEntryResponse>> {
+    ok(MobileEntryResponse {
+        name: "JusticeAI 农民工欠薪申诉移动端",
+        audience: "农民工、基层劳动者、法律援助接待人员",
+        purpose: "用于欠薪咨询、线索登记、关键信息识别、材料补证和证据链完善引导",
+        local_url: "http://127.0.0.1:18101",
+        docker_service: "frontend-mobile",
+        dev_command: "npm --prefix frontend-vue run dev:mobile",
+        backend_api_base: "/api",
+        scenes: vec![
+            MobileScene {
+                key: "consult",
+                title: "智能咨询",
+                description: "通过对话帮助劳动者描述欠薪问题并获得基础指引",
+            },
+            MobileScene {
+                key: "feedback",
+                title: "欠薪线索反映",
+                description: "识别项目、用工主体、工作期间、欠薪金额等关键字段",
+            },
+            MobileScene {
+                key: "evidence",
+                title: "冲突识别与补证",
+                description: "提示金额冲突、时间断点、证据缺失并生成补证清单",
+            },
+        ],
     })
 }
 

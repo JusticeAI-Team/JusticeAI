@@ -67,12 +67,27 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_BASE_URL: /api
+        VITE_APP_ENTRY: desktop
     container_name: justiceai-frontend
     restart: unless-stopped
     depends_on:
       - backend
     ports:
       - "18100:80"
+
+  frontend-mobile:
+    build:
+      context: ./frontend-vue
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+        VITE_APP_ENTRY: mobile
+    container_name: justiceai-frontend-mobile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "18101:80"
 
   milvus:
     image: milvusdb/milvus:v2.4.15
