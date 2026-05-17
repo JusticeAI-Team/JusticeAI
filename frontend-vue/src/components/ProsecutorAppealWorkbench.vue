@@ -178,6 +178,7 @@
                 <div><span>证据分</span><strong>{{ standardEvidence.score ?? detail.appeal.material_score }}</strong></div>
                 <div><span>建议风险等级</span><strong>{{ standardRiskMapping.risk_level || 'medium' }}</strong></div>
                 <div><span>建议区域</span><strong>{{ standardRiskMapping.area_name || locationText }}</strong></div>
+                <div><span>风险标签</span><strong>{{ riskTagText }}</strong></div>
               </div>
               <p>{{ standardRiskMapping.risk_reason_summary || '标准化后可用于转入 risk_cases 前的人工复核。' }}</p>
             </article>
@@ -357,6 +358,7 @@ const standardMissingMaterials = computed(() => Array.isArray(standardization.va
 const standardConflicts = computed(() => Array.isArray(standardization.value?.conflict_items) ? standardization.value.conflict_items : [])
 const standardEvidence = computed(() => standardization.value?.evidence_assessment || {})
 const standardRiskMapping = computed(() => standardization.value?.risk_case_mapping || {})
+const riskTagText = computed(() => normalizeRiskTags(standardRiskMapping.value.risk_tags).join('、') || '欠薪、农民工')
 
 const mapPointData = () => appeals.value
   .filter((item) => Number.isFinite(Number(item.longitude)) && Number.isFinite(Number(item.latitude)))
@@ -423,6 +425,12 @@ const setStatus = async (status) => {
 }
 
 const compactUnique = (items) => Array.from(new Set(items.map((item) => `${item || ''}`.trim()).filter(Boolean)))
+
+const normalizeRiskTags = (value) => {
+  if (Array.isArray(value)) return compactUnique(value)
+  if (typeof value === 'string') return compactUnique(value.split(/[，,、\s]+/))
+  return []
+}
 
 const deadlineAfterDays = (days) => {
   const date = new Date()
@@ -498,6 +506,22 @@ const requestMaterials = async () => {
   await afterAction()
 }
 
+const buildRiskCaseRequest = () => {
+  const mapping = standardRiskMapping.value || {}
+  const payload = {
+    create_alert: true,
+    create_dispatch_task: false
+  }
+  if (['low', 'medium', 'high'].includes(mapping.risk_level)) {
+    payload.risk_level = mapping.risk_level
+  }
+  const tags = normalizeRiskTags(mapping.risk_tags)
+  if (tags.length > 0) {
+    payload.risk_tags = tags
+  }
+  return payload
+}
+
 const confirmLocation = async () => {
   if (!activeId.value || !detail.value?.location) return
   await apiPost(`/prosecutor/appeals/${activeId.value}/location/confirm`, {
@@ -533,12 +557,7 @@ const startProcessing = async () => {
 
 const convertRiskCase = async () => {
   if (!activeId.value) return
-  await apiPost(`/prosecutor/appeals/${activeId.value}/convert-risk-case`, {
-    risk_level: 'medium',
-    risk_tags: ['欠薪', '农民工', '工程建设'],
-    create_alert: true,
-    create_dispatch_task: false
-  }, { headers: STAFF_HEADERS })
+  await apiPost(`/prosecutor/appeals/${activeId.value}/convert-risk-case`, buildRiskCaseRequest(), { headers: STAFF_HEADERS })
   activeTab.value = 'fusion'
   await afterAction()
 }
