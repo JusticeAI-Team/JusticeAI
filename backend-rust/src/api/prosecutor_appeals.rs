@@ -190,6 +190,7 @@ async fn list_appeals(
     Query(query): Query<AppealListQuery>,
 ) -> Result<Json<ApiResponse<PageResponse<AppealListItem>>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    let effective_area_code = effective_area_code(&headers, query.area_code.as_deref())?;
     let page = query.page.unwrap_or(1).max(1);
     let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
     let offset = (page - 1) * page_size;
@@ -210,7 +211,7 @@ async fn list_appeals(
         "#,
     )
     .bind(query.status.as_deref())
-    .bind(query.area_code.as_deref())
+    .bind(effective_area_code.as_deref())
     .bind(keyword.as_deref())
     .bind(query.submitted_from)
     .bind(query.submitted_to)
@@ -238,7 +239,7 @@ async fn list_appeals(
         "#,
     )
     .bind(query.status.as_deref())
-    .bind(query.area_code.as_deref())
+    .bind(effective_area_code.as_deref())
     .bind(keyword.as_deref())
     .bind(query.submitted_from)
     .bind(query.submitted_to)
@@ -262,6 +263,7 @@ async fn appeal_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    ensure_staff_area_access(state.db(), &headers, id).await?;
     Ok(ok(load_detail(state.db(), id).await?))
 }
 
@@ -271,6 +273,7 @@ async fn appeal_graph(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<AppealGraphResponse>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    ensure_staff_area_access(state.db(), &headers, id).await?;
     let linked = load_primary_risk_case(state.db(), id).await?;
     let nodes = sqlx::query_as::<_, GraphNode>(
         r#"
@@ -322,6 +325,7 @@ async fn appeal_similar(
     Query(query): Query<SimilarQuery>,
 ) -> Result<Json<ApiResponse<AppealSimilarResponse>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    ensure_staff_area_access(state.db(), &headers, id).await?;
     let linked = load_primary_risk_case(state.db(), id).await?;
     let limit = query.limit.unwrap_or(5).clamp(1, 20);
     let items = sqlx::query_as::<_, SimilarRiskCaseItem>(
@@ -381,6 +385,7 @@ async fn accept(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    ensure_staff_area_access(state.db(), &headers, id).await?;
     let staff_id = staff_id(&headers);
     let staff_role = staff_role(&headers);
     let appeal = appeal_service::get_appeal(state.db(), id).await?;
@@ -440,6 +445,7 @@ async fn request_materials(
     Json(input): Json<RequestMaterialsInput>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    ensure_staff_area_access(state.db(), &headers, id).await?;
     let staff_id = staff_id(&headers);
     let staff_role = staff_role(&headers);
     let appeal = appeal_service::get_appeal(state.db(), id).await?;
@@ -497,6 +503,7 @@ async fn status_action(
     Json(input): Json<StatusActionInput>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    ensure_staff_area_access(state.db(), &headers, id).await?;
     let staff_id = staff_id(&headers);
     let staff_role = staff_role(&headers);
     let appeal = appeal_service::get_appeal(state.db(), id).await?;
@@ -557,6 +564,7 @@ async fn convert_risk_case(
     Json(input): Json<ConvertRiskCaseInput>,
 ) -> Result<Json<ApiResponse<ConversionResult>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    ensure_staff_area_access(state.db(), &headers, id).await?;
     let staff_id = staff_id(&headers);
     Ok(ok(
         appeal_conversion_service::convert_to_risk_case(state.db(), id, &staff_id, input).await?,
@@ -570,6 +578,7 @@ async fn link_risk_case(
     Json(input): Json<LinkRiskCaseInput>,
 ) -> Result<Json<ApiResponse<AppealRiskCaseLinkRow>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    ensure_staff_area_access(state.db(), &headers, id).await?;
     let staff_id = staff_id(&headers);
     Ok(ok(
         appeal_conversion_service::link_existing_risk_case(state.db(), id, &staff_id, input).await?,
@@ -583,6 +592,7 @@ async fn resolve(
     Json(input): Json<ResolveInput>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    ensure_staff_area_access(state.db(), &headers, id).await?;
     let staff_id = staff_id(&headers);
     let staff_role = staff_role(&headers);
     let appeal = appeal_service::get_appeal(state.db(), id).await?;
@@ -643,6 +653,7 @@ async fn confirm_location(
     Json(input): Json<StaffConfirmLocationInput>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
     ensure_staff_allowed(&headers)?;
+    ensure_staff_area_access(state.db(), &headers, id).await?;
     let staff_id = staff_id(&headers);
     appeal_service::confirm_location_by_staff(state.db(), id, &staff_id, input).await?;
     Ok(ok(load_detail(state.db(), id).await?))
@@ -755,6 +766,57 @@ fn ensure_staff_allowed(headers: &HeaderMap) -> Result<(), AppError> {
         role.as_str(),
         "prosecutor" | "prosecutor_reviewer" | "prosecutor_admin"
     ) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+fn staff_area_code(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-staff-area-code")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn effective_area_code(
+    headers: &HeaderMap,
+    query_area_code: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    if staff_role(headers) == "prosecutor_admin" {
+        return Ok(query_area_code.map(str::to_string));
+    }
+    let staff_area = staff_area_code(headers);
+    if let (Some(staff_area), Some(query_area)) = (staff_area.as_deref(), query_area_code) {
+        if staff_area != query_area {
+            return Err(AppError::Forbidden);
+        }
+    }
+    Ok(staff_area.or_else(|| query_area_code.map(str::to_string)))
+}
+
+async fn ensure_staff_area_access(
+    db: &sqlx::PgPool,
+    headers: &HeaderMap,
+    appeal_id: Uuid,
+) -> Result<(), AppError> {
+    if staff_role(headers) == "prosecutor_admin" {
+        return Ok(());
+    }
+    let Some(staff_area) = staff_area_code(headers) else {
+        return Ok(());
+    };
+    let area_code = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT area_code FROM appeal_locations WHERE appeal_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(appeal_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)?
+    .flatten();
+    if area_code.as_deref() == Some(staff_area.as_str()) {
         Ok(())
     } else {
         Err(AppError::Forbidden)
