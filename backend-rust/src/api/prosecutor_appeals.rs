@@ -14,6 +14,7 @@ use crate::{
     domain::appeal_status,
     services::{
         appeal_conversion_service,
+        appeal_conversion_service::ConversionResult,
         appeal_service::{
             self, mask_name, mask_phone, AppealEventRow, AppealLocationRow, AppealMaterialRow,
             AppealRiskCaseLinkRow, ConvertRiskCaseInput, LaborAppealRow, LinkRiskCaseInput,
@@ -369,7 +370,7 @@ async fn convert_risk_case(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(input): Json<ConvertRiskCaseInput>,
-) -> Result<Json<ApiResponse<AppealRiskCaseLinkRow>>, AppError> {
+) -> Result<Json<ApiResponse<ConversionResult>>, AppError> {
     let staff_id = staff_id(&headers);
     Ok(ok(
         appeal_conversion_service::convert_to_risk_case(state.db(), id, &staff_id, input).await?,

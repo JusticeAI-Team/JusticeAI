@@ -1,5 +1,6 @@
 use chrono::Utc;
-use sqlx::{FromRow, PgPool};
+use serde::Serialize;
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -20,7 +21,7 @@ pub async fn convert_to_risk_case(
     appeal_id: Uuid,
     staff_id: &str,
     input: ConvertRiskCaseInput,
-) -> Result<AppealRiskCaseLinkRow, AppError> {
+) -> Result<ConversionResult, AppError> {
     if let Some(existing) = sqlx::query_as::<_, ExistingLink>(
         "SELECT risk_case_id FROM appeal_risk_case_links WHERE appeal_id = $1 LIMIT 1",
     )
@@ -29,7 +30,11 @@ pub async fn convert_to_risk_case(
     .await
     .map_err(|_| AppError::Internal)?
     {
-        return load_link(db, appeal_id, existing.risk_case_id).await;
+        let link = load_link(db, appeal_id, existing.risk_case_id).await?;
+        return Ok(ConversionResult {
+            link,
+            triggered_jobs: Vec::new(),
+        });
     }
 
     let appeal = appeal_service::get_appeal(db, appeal_id).await?;
@@ -216,8 +221,27 @@ pub async fn convert_to_risk_case(
         .map_err(|_| AppError::Internal)?;
     }
 
+    let triggered_jobs = create_downstream_jobs_tx(&mut tx, appeal_id, risk_case_id, staff_id, now).await?;
+
     tx.commit().await.map_err(|_| AppError::Internal)?;
-    load_link(db, appeal_id, risk_case_id).await
+    Ok(ConversionResult {
+        link: load_link(db, appeal_id, risk_case_id).await?,
+        triggered_jobs,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversionResult {
+    pub link: AppealRiskCaseLinkRow,
+    pub triggered_jobs: Vec<TriggeredJob>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TriggeredJob {
+    pub id: Uuid,
+    pub job_type: String,
+    pub target_type: String,
+    pub target_id: Uuid,
 }
 
 pub async fn link_existing_risk_case(
@@ -277,6 +301,63 @@ pub async fn link_existing_risk_case(
     .await?;
     tx.commit().await.map_err(|_| AppError::Internal)?;
     load_link(db, appeal_id, input.risk_case_id).await
+}
+
+async fn create_downstream_jobs_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    appeal_id: Uuid,
+    risk_case_id: Uuid,
+    staff_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<Vec<TriggeredJob>, AppError> {
+    let specs = [
+        ("appeal_risk_case_agent_analyze", "risk_case"),
+        ("appeal_risk_case_graph_rebuild", "risk_case"),
+        ("appeal_risk_case_vector_rebuild", "risk_case"),
+        ("appeal_similar_case_discovery", "labor_appeal"),
+    ];
+    let mut jobs = Vec::new();
+    for (job_type, target_type) in specs {
+        let job_id = Uuid::new_v4();
+        let target_id = if target_type == "labor_appeal" {
+            appeal_id
+        } else {
+            risk_case_id
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO platform_jobs (
+                id, job_type, target_type, target_id, status, progress_percent, message,
+                request_json, result_json, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, 'queued', 0, $5, $6, '{}', $7, $7)
+            "#,
+        )
+        .bind(job_id)
+        .bind(job_type)
+        .bind(target_type)
+        .bind(target_id)
+        .bind("created after labor appeal converted to risk_case")
+        .bind(
+            serde_json::json!({
+                "appeal_id": appeal_id,
+                "risk_case_id": risk_case_id,
+                "created_by": staff_id
+            })
+            .to_string(),
+        )
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| AppError::Internal)?;
+        jobs.push(TriggeredJob {
+            id: job_id,
+            job_type: job_type.to_string(),
+            target_type: target_type.to_string(),
+            target_id,
+        });
+    }
+    Ok(jobs)
 }
 
 async fn load_link(
