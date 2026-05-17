@@ -44,7 +44,7 @@ pub async fn convert_to_risk_case(
     let now = Utc::now();
     let risk_case_id = Uuid::new_v4();
     let standardization =
-        appeal_standardization_service::latest_standardization(db, appeal_id).await?;
+        appeal_standardization_service::preferred_standardization(db, appeal_id).await?;
     let mapping = standardization
         .as_ref()
         .map(|item| item.risk_case_mapping.clone())

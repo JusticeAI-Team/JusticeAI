@@ -84,6 +84,9 @@ async fn review_standardization(
     if input.reviewed_by.is_none() {
         input.reviewed_by = Some(staff_id(&headers));
     }
+    if input.reviewed_role.is_none() {
+        input.reviewed_role = Some(staff_role(&headers));
+    }
     Ok(ok(
         appeal_standardization_service::review_standardization(
             state.db(),

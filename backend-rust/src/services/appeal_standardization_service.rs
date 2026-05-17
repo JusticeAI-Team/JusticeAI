@@ -150,6 +150,7 @@ pub struct AppealStandardizationRow {
 pub struct ReviewStandardizationInput {
     pub human_revision_json: Option<serde_json::Value>,
     pub reviewed_by: Option<String>,
+    pub reviewed_role: Option<String>,
 }
 
 pub async fn standardize_appeal(
@@ -443,14 +444,89 @@ pub async fn latest_standardization(
     .map_err(|_| AppError::Internal)
 }
 
+pub async fn preferred_standardization(
+    db: &PgPool,
+    appeal_id: Uuid,
+) -> Result<Option<AppealStandardizationRow>, AppError> {
+    sqlx::query_as::<_, AppealStandardizationRow>(
+        r#"
+        SELECT *
+        FROM appeal_standardizations
+        WHERE appeal_id = $1
+          AND status = 'completed'
+        ORDER BY
+            CASE
+                WHEN reviewed_at IS NOT NULL
+                 AND human_revision_json->>'review_decision' = 'approved'
+                THEN 0
+                ELSE 1
+            END,
+            created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(appeal_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)
+}
+
 pub async fn review_standardization(
     db: &PgPool,
     appeal_id: Uuid,
     standardization_id: Uuid,
     input: ReviewStandardizationInput,
 ) -> Result<AppealStandardizationRow, AppError> {
+    let appeal = appeal_service::get_appeal(db, appeal_id).await?;
     let reviewed_by = input.reviewed_by.unwrap_or_else(|| "dev-staff".to_string());
-    sqlx::query_as::<_, AppealStandardizationRow>(
+    let reviewed_role = input
+        .reviewed_role
+        .unwrap_or_else(|| "prosecutor".to_string());
+    let mut revision = input
+        .human_revision_json
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !revision.is_object() {
+        return Err(AppError::Validation(
+            "human_revision_json must be an object".to_string(),
+        ));
+    }
+    let decision = revision
+        .get("review_decision")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("approved")
+        .to_string();
+    if !matches!(decision.as_str(), "approved" | "needs_revision") {
+        return Err(AppError::Validation(
+            "review_decision must be approved or needs_revision".to_string(),
+        ));
+    }
+    let note = revision
+        .get("review_note")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if decision == "approved" {
+                "已人工确认采用智能标准化结果"
+            } else {
+                "智能标准化结果需修订后再采用"
+            }
+        })
+        .to_string();
+    if let Some(object) = revision.as_object_mut() {
+        object.insert(
+            "review_decision".to_string(),
+            serde_json::Value::String(decision.clone()),
+        );
+        object.insert(
+            "review_note".to_string(),
+            serde_json::Value::String(note.clone()),
+        );
+    }
+
+    let now = Utc::now();
+    let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
+    let row = sqlx::query_as::<_, AppealStandardizationRow>(
         r#"
         UPDATE appeal_standardizations
         SET human_revision_json = $3,
@@ -463,17 +539,54 @@ pub async fn review_standardization(
     )
     .bind(standardization_id)
     .bind(appeal_id)
-    .bind(
-        input
-            .human_revision_json
-            .unwrap_or_else(|| serde_json::json!({})),
-    )
-    .bind(reviewed_by)
-    .bind(Utc::now())
-    .fetch_optional(db)
+    .bind(revision)
+    .bind(&reviewed_by)
+    .bind(now)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|_| AppError::Internal)?
-    .ok_or(AppError::NotFound)
+    .ok_or(AppError::NotFound)?;
+
+    let (event_type, title, action_type) = if decision == "approved" {
+        (
+            "standardization_approved",
+            "确认采用智能整理",
+            "standardization_approved",
+        )
+    } else {
+        (
+            "standardization_needs_revision",
+            "智能整理需修订",
+            "standardization_needs_revision",
+        )
+    };
+    appeal_service::insert_event_tx(
+        &mut tx,
+        appeal_id,
+        event_type,
+        "staff",
+        &reviewed_by,
+        title,
+        &note,
+        false,
+    )
+    .await?;
+    appeal_service::insert_review_action_tx(
+        &mut tx,
+        appeal_id,
+        &reviewed_by,
+        &reviewed_role,
+        action_type,
+        &appeal.status,
+        &appeal.status,
+        "",
+        &note,
+        &format!("standardization_id={standardization_id}; decision={decision}"),
+        None,
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AppError::Internal)?;
+    Ok(row)
 }
 
 async fn load_standardization(db: &PgPool, id: Uuid) -> Result<AppealStandardizationRow, AppError> {

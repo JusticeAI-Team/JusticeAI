@@ -149,6 +149,13 @@
                   <div><span>模型</span><strong>{{ standardization.model_name || 'fallback' }}</strong></div>
                   <div><span>Prompt</span><strong>{{ standardization.prompt_version }}</strong></div>
                   <div><span>置信度</span><strong>{{ Math.round((standardization.confidence || 0) * 100) }}%</strong></div>
+                  <div><span>复核状态</span><strong>{{ standardReviewText }}</strong></div>
+                  <div><span>复核人员</span><strong>{{ standardization.reviewed_by || '待复核' }}</strong></div>
+                  <div><span>复核时间</span><strong>{{ formatTime(standardization.reviewed_at) || '待复核' }}</strong></div>
+                </div>
+                <div class="review-actions">
+                  <button class="primary" @click="reviewStandardization('approved')">确认采用</button>
+                  <button @click="reviewStandardization('needs_revision')">标记需修订</button>
                 </div>
               </template>
               <p v-else>尚未生成标准化材料。点击开始整理后，系统会基于口语描述、材料元数据和定位信息生成可复核材料。</p>
@@ -359,6 +366,13 @@ const standardConflicts = computed(() => Array.isArray(standardization.value?.co
 const standardEvidence = computed(() => standardization.value?.evidence_assessment || {})
 const standardRiskMapping = computed(() => standardization.value?.risk_case_mapping || {})
 const riskTagText = computed(() => normalizeRiskTags(standardRiskMapping.value.risk_tags).join('、') || '欠薪、农民工')
+const standardReviewDecision = computed(() => standardization.value?.human_revision_json?.review_decision || '')
+const standardReviewText = computed(() => {
+  if (!standardization.value?.reviewed_at) return '待人工复核'
+  if (standardReviewDecision.value === 'approved') return '已确认采用'
+  if (standardReviewDecision.value === 'needs_revision') return '需修订'
+  return '已复核'
+})
 
 const mapPointData = () => appeals.value
   .filter((item) => Number.isFinite(Number(item.longitude)) && Number.isFinite(Number(item.latitude)))
@@ -536,6 +550,25 @@ const runStandardization = async () => {
   if (!activeId.value) return
   standardization.value = await apiPost(`/prosecutor/appeals/${activeId.value}/standardize`, {}, { headers: STAFF_HEADERS })
   activeTab.value = 'standard'
+  await loadDetail()
+}
+
+const reviewStandardization = async (decision) => {
+  if (!activeId.value || !standardization.value?.id) return
+  const isApproved = decision === 'approved'
+  standardization.value = await apiPost(
+    `/prosecutor/appeals/${activeId.value}/standardizations/${standardization.value.id}/review`,
+    {
+      human_revision_json: {
+        review_decision: decision,
+        review_note: isApproved
+          ? '已人工复核，确认采用当前智能标准化结果。'
+          : '已人工复核，当前智能标准化结果需补充修订后再采用。',
+        reviewed_fields: ['standardized_text', 'missing_materials', 'evidence_assessment', 'risk_case_mapping']
+      }
+    },
+    { headers: STAFF_HEADERS }
+  )
   await loadDetail()
 }
 
@@ -788,6 +821,7 @@ em {
 .panel-header button,
 .header-actions button,
 .work-actions button,
+.review-actions button,
 .status-tabs button,
 .search-row button {
   padding: 8px 12px;
@@ -797,6 +831,7 @@ em {
 }
 
 .primary,
+.review-actions .primary,
 .work-actions .primary {
   background: #1f63d1 !important;
   color: #fff !important;
@@ -962,6 +997,13 @@ em {
 .field-grid span,
 .field-grid strong {
   display: block;
+}
+
+.review-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
 }
 
 .evidence-track {
