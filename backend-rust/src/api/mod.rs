@@ -1,4 +1,5 @@
 pub mod appeal_materials;
+pub mod appeal_standardization;
 pub mod appeals;
 pub mod geo;
 pub mod health;
@@ -21,6 +22,7 @@ pub fn routes() -> Router<AppState> {
         .merge(geo::routes())
         .merge(mobile::routes())
         .merge(appeal_materials::routes())
+        .merge(appeal_standardization::routes())
         .merge(prosecutor_appeals::routes())
         .merge(platform::routes())
 }

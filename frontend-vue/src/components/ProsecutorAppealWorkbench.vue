@@ -92,6 +92,7 @@
 
           <nav class="doc-tabs">
             <button :class="{ active: activeTab === 'summary' }" @click="activeTab = 'summary'">线索摘要</button>
+            <button :class="{ active: activeTab === 'standard' }" @click="activeTab = 'standard'">智能标准化</button>
             <button :class="{ active: activeTab === 'raw' }" @click="activeTab = 'raw'">移动端原始信息</button>
             <button :class="{ active: activeTab === 'timeline' }" @click="activeTab = 'timeline'">时间线</button>
           </nav>
@@ -134,6 +135,53 @@
             </article>
           </section>
 
+          <section v-else-if="activeTab === 'standard'" class="doc-body">
+            <article class="standard-section">
+              <header>
+                <strong>智能整理结果</strong>
+                <button @click="runStandardization">{{ standardization ? '重新整理' : '开始整理' }}</button>
+              </header>
+              <template v-if="standardization">
+                <h3>{{ standardization.standardized_title }}</h3>
+                <p>{{ standardization.standardized_text || standardization.standard_summary }}</p>
+                <div class="field-grid">
+                  <div><span>模型</span><strong>{{ standardization.model_name || 'fallback' }}</strong></div>
+                  <div><span>Prompt</span><strong>{{ standardization.prompt_version }}</strong></div>
+                  <div><span>置信度</span><strong>{{ Math.round((standardization.confidence || 0) * 100) }}%</strong></div>
+                </div>
+              </template>
+              <p v-else>尚未生成标准化材料。点击开始整理后，系统会基于口语描述、材料元数据和定位信息生成可复核材料。</p>
+            </article>
+
+            <article class="standard-section" v-if="standardization">
+              <header>
+                <strong>缺失材料与冲突信息</strong>
+                <span>需人工复核</span>
+              </header>
+              <div class="evidence-checks">
+                <span v-for="item in standardMissingMaterials" :key="item.label || item">{{ item.label || item }}</span>
+                <span v-if="standardMissingMaterials.length === 0">未识别到缺失材料</span>
+              </div>
+              <div class="conflict-list">
+                <p v-for="item in standardConflicts" :key="item.description || item">{{ item.description || item }}</p>
+                <p v-if="standardConflicts.length === 0">未识别到明显冲突。</p>
+              </div>
+            </article>
+
+            <article class="standard-section" v-if="standardization">
+              <header>
+                <strong>证据强度与风险案件建议</strong>
+                <span>{{ standardEvidence.level || '待评估' }}</span>
+              </header>
+              <div class="field-grid">
+                <div><span>证据分</span><strong>{{ standardEvidence.score ?? detail.appeal.material_score }}</strong></div>
+                <div><span>建议风险等级</span><strong>{{ standardRiskMapping.risk_level || 'medium' }}</strong></div>
+                <div><span>建议区域</span><strong>{{ standardRiskMapping.area_name || locationText }}</strong></div>
+              </div>
+              <p>{{ standardRiskMapping.risk_reason_summary || '标准化后可用于转入 risk_cases 前的人工复核。' }}</p>
+            </article>
+          </section>
+
           <section v-else-if="activeTab === 'raw'" class="doc-body raw-body">
             <article class="trace-card">
               <header><strong>定位与行政区</strong><button>查看定位</button></header>
@@ -164,6 +212,7 @@
           </section>
 
           <footer class="work-actions">
+            <button @click="runStandardization">智能整理</button>
             <button @click="startProcessing">开始办理</button>
             <button @click="convertRiskCase">转风险案件</button>
             <button class="primary" @click="resolveAppeal">办结并通知</button>
@@ -222,6 +271,7 @@ const keyword = ref('')
 const statusFilter = ref('')
 const appeals = ref([])
 const detail = ref(null)
+const standardization = ref(null)
 const total = ref(0)
 const activeId = ref('')
 let mapIns = null
@@ -252,6 +302,10 @@ const metrics = computed(() => {
 
 const locationText = computed(() => detail.value?.location?.address_text || '北京市XX区XX地点')
 const missingMaterials = computed(() => (detail.value?.appeal.missing_materials || '').split('\n').filter(Boolean))
+const standardMissingMaterials = computed(() => Array.isArray(standardization.value?.missing_materials) ? standardization.value.missing_materials : [])
+const standardConflicts = computed(() => Array.isArray(standardization.value?.conflict_items) ? standardization.value.conflict_items : [])
+const standardEvidence = computed(() => standardization.value?.evidence_assessment || {})
+const standardRiskMapping = computed(() => standardization.value?.risk_case_mapping || {})
 
 const loadAppeals = async () => {
   const params = new URLSearchParams({ page: '1', page_size: '50' })
@@ -266,6 +320,7 @@ const loadAppeals = async () => {
 const openDetail = async (id) => {
   activeId.value = id
   detail.value = await apiGet(`/prosecutor/appeals/${id}`, { headers: STAFF_HEADERS })
+  standardization.value = await apiGet(`/prosecutor/appeals/${id}/standardizations/latest`, { headers: STAFF_HEADERS })
 }
 
 const loadDetail = async () => {
@@ -286,6 +341,13 @@ const requestMaterials = async () => {
     internal_note: '当前材料链不完整，需补强工作关系和欠薪金额。'
   }, { headers: STAFF_HEADERS })
   await afterAction()
+}
+
+const runStandardization = async () => {
+  if (!activeId.value) return
+  standardization.value = await apiPost(`/prosecutor/appeals/${activeId.value}/standardize`, {}, { headers: STAFF_HEADERS })
+  activeTab.value = 'standard'
+  await loadDetail()
 }
 
 const acceptAppeal = async () => {
@@ -692,6 +754,11 @@ em {
   margin-bottom: 10px;
 }
 
+.standard-section h3 {
+  margin: 4px 0 8px;
+  color: #173a7a;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -733,6 +800,15 @@ em {
   color: #9a3412;
   border-radius: 999px;
   padding: 6px 9px;
+}
+
+.conflict-list {
+  margin-top: 10px;
+}
+
+.conflict-list p {
+  margin: 6px 0;
+  color: #46556c;
 }
 
 .trace-grid {

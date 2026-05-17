@@ -88,6 +88,33 @@ pub struct ReportOutput {
 }
 
 #[derive(Debug, Clone)]
+pub struct AppealStandardizationInput {
+    pub oral_description: String,
+    pub structured_fields: serde_json::Value,
+    pub materials: serde_json::Value,
+    pub location: serde_json::Value,
+    pub material_score: i32,
+    pub missing_materials: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppealStandardizationOutput {
+    pub standardized_title: String,
+    pub standardized_text: String,
+    pub extracted_fields: serde_json::Value,
+    pub inferred_fields: serde_json::Value,
+    pub missing_materials: serde_json::Value,
+    pub conflict_items: serde_json::Value,
+    pub evidence_assessment: serde_json::Value,
+    pub risk_case_mapping: serde_json::Value,
+    pub confidence: f64,
+    #[serde(skip)]
+    pub is_placeholder: bool,
+    #[serde(skip)]
+    pub model_contract: Option<ModelContract>,
+}
+
+#[derive(Debug, Clone)]
 pub struct OpenAiCompatibleAiService {
     client: Client,
     base_url: String,
@@ -259,6 +286,89 @@ impl OpenAiCompatibleAiService {
             }
             Err(error) => {
                 warn!(error = %error, "AI report request failed, using deterministic fallback");
+                fallback
+            }
+        }
+    }
+
+    pub async fn standardize_appeal(
+        &self,
+        input: &AppealStandardizationInput,
+    ) -> AppealStandardizationOutput {
+        let fallback = fallback_appeal_standardization(input, self.configured_contract());
+        let schema = r#"{
+  "standardized_title": "string",
+  "standardized_text": "string",
+  "extracted_fields": {
+    "worker_name": "string",
+    "worker_phone": "string",
+    "wage_amount": "number or null",
+    "wage_amount_text": "string",
+    "employer_name": "string",
+    "contractor_name": "string",
+    "project_name": "string",
+    "work_period_text": "string",
+    "area_name": "string"
+  },
+  "inferred_fields": [{"field":"string","value":"string","basis":"string","confidence":0.0}],
+  "missing_materials": [{"category":"string","label":"string","importance":"high|medium|low","reason":"string"}],
+  "conflict_items": [{"field":"string","description":"string","severity":"high|medium|low"}],
+  "evidence_assessment": {"score":0,"level":"weak|medium|strong","strong_evidence":[],"auxiliary_evidence":[]},
+  "risk_case_mapping": {
+    "title":"string",
+    "source_type":"mobile_labor_appeal",
+    "area_name":"string",
+    "risk_level":"low|medium|high",
+    "risk_score":0,
+    "risk_tags":["欠薪","农民工"],
+    "risk_reason_summary":"string",
+    "disposal_advice":"string"
+  },
+  "confidence":0.0
+}"#;
+        let prompt = format!(
+            "你是检察机关劳动者权益保障场景的材料整理助手。任务是把农民工提交的口语化欠薪描述整理为检察院工作人员可读、可核验、可补证的标准化申诉材料。\n\n\
+必须遵守：\n\
+1. 不得编造事实。\n\
+2. 用户没有提供的信息必须填 null、空字符串或空数组。\n\
+3. 如果只能推测，必须放入 inferred_fields，并写 basis 和 confidence。\n\
+4. 推测内容不得写成确定事实。\n\
+5. 必须识别缺失材料、冲突信息、证据强度和补证建议。\n\
+6. 只输出 JSON，不要输出 Markdown 或解释文字。\n\n\
+输出 JSON Schema:\n{schema}\n\n\
+输入：\n\
+- 原始描述：{}\n\
+- 用户填写字段：{}\n\
+- 材料列表：{}\n\
+- 定位信息：{}\n\
+- 规则材料完整度：{}\n\
+- 当前缺失材料：{}",
+            input.oral_description,
+            input.structured_fields,
+            input.materials,
+            input.location,
+            input.material_score,
+            input.missing_materials.join("；")
+        );
+
+        let system =
+            "You are JusticeAI labor appeal standardization engine. Return strict JSON only.";
+        match self
+            .chat_json::<AppealStandardizationOutput>(system, &prompt, 0.0, 1600)
+            .await
+        {
+            Ok(mut value) if validate_appeal_standardization_output(&value) => {
+                value.confidence = clamp_confidence(value.confidence);
+                value.is_placeholder = false;
+                value.model_contract = Some(self.resolved_contract().await);
+                value
+            }
+            Ok(_) => {
+                warn!("AI appeal standardization response failed validation, using fallback");
+                fallback
+            }
+            Err(error) => {
+                warn!(error = %error, "AI appeal standardization request failed, using fallback");
                 fallback
             }
         }
@@ -810,6 +920,128 @@ fn fallback_report(input: &ReportInput, contract: ModelContract) -> ReportOutput
         ),
         is_placeholder: true,
         model_contract: fallback_contract,
+    }
+}
+
+fn validate_appeal_standardization_output(output: &AppealStandardizationOutput) -> bool {
+    !output.standardized_title.trim().is_empty()
+        && !output.standardized_text.trim().is_empty()
+        && output.extracted_fields.is_object()
+        && output.missing_materials.is_array()
+        && output.conflict_items.is_array()
+        && output.evidence_assessment.is_object()
+        && output.risk_case_mapping.is_object()
+}
+
+fn fallback_appeal_standardization(
+    input: &AppealStandardizationInput,
+    contract: ModelContract,
+) -> AppealStandardizationOutput {
+    let mut fallback_contract = contract;
+    fallback_contract.is_placeholder = true;
+
+    let field = |key: &str| {
+        input
+            .structured_fields
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let area_name = input
+        .location
+        .get("area_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("北京市XX区")
+        .to_string();
+    let project_name = field("project_name");
+    let title_subject = if project_name.trim().is_empty() {
+        format!("{area_name}欠薪诉求")
+    } else {
+        format!("{project_name}欠薪诉求")
+    };
+    let evidence_level = if input.material_score >= 75 {
+        "strong"
+    } else if input.material_score >= 60 {
+        "medium"
+    } else {
+        "weak"
+    };
+    let risk_level = if input.material_score < 45 {
+        "medium"
+    } else {
+        "low"
+    };
+    let missing = input
+        .missing_materials
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "category": "other",
+                "label": item,
+                "importance": "high",
+                "reason": "用于补强欠薪事实、用工关系或欠薪金额"
+            })
+        })
+        .collect::<Vec<_>>();
+    let material_categories = input
+        .materials
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("category").and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    AppealStandardizationOutput {
+        standardized_title: title_subject.clone(),
+        standardized_text: format!(
+            "申诉人反映其在{}务工期间存在工资拖欠情况，欠薪金额描述为“{}”。现有材料完整度为{}分，仍需结合用工关系、欠薪金额和考勤等材料进行人工核验。",
+            if project_name.trim().is_empty() {
+                area_name.clone()
+            } else {
+                project_name.clone()
+            },
+            field("wage_amount_text"),
+            input.material_score
+        ),
+        extracted_fields: serde_json::json!({
+            "worker_name": field("worker_name"),
+            "worker_phone": field("worker_phone"),
+            "wage_amount": null,
+            "wage_amount_text": field("wage_amount_text"),
+            "employer_name": field("employer_name"),
+            "contractor_name": field("contractor_name"),
+            "project_name": project_name,
+            "work_period_text": field("work_period_text"),
+            "area_name": area_name
+        }),
+        inferred_fields: serde_json::json!([]),
+        missing_materials: serde_json::Value::Array(missing),
+        conflict_items: serde_json::json!([]),
+        evidence_assessment: serde_json::json!({
+            "score": input.material_score,
+            "level": evidence_level,
+            "strong_evidence": material_categories.iter().filter(|category| matches!(category.as_str(), "labor_contract" | "wage_record" | "attendance" | "bank_statement")).cloned().collect::<Vec<_>>(),
+            "auxiliary_evidence": material_categories.iter().filter(|category| !matches!(category.as_str(), "labor_contract" | "wage_record" | "attendance" | "bank_statement")).cloned().collect::<Vec<_>>()
+        }),
+        risk_case_mapping: serde_json::json!({
+            "title": title_subject,
+            "source_type": "mobile_labor_appeal",
+            "area_name": area_name,
+            "risk_level": risk_level,
+            "risk_score": input.material_score,
+            "risk_tags": ["欠薪", "农民工", "工程建设"],
+            "risk_reason_summary": "涉及农民工工资拖欠，需要核实用工关系、欠薪金额和同项目类似线索。",
+            "disposal_advice": "建议先补强工资记录、考勤记录、劳动合同或用工证明，再联系属地部门核实。"
+        }),
+        confidence: 0.58,
+        is_placeholder: true,
+        model_contract: Some(fallback_contract),
     }
 }
 

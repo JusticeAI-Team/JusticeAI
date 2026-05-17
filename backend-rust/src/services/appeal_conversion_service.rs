@@ -6,6 +6,7 @@ use crate::{
     services::appeal_service::{
         self, AppealRiskCaseLinkRow, ConvertRiskCaseInput, LinkRiskCaseInput,
     },
+    services::appeal_standardization_service,
     shared::error::AppError,
 };
 
@@ -35,31 +36,80 @@ pub async fn convert_to_risk_case(
     let location = appeal_service::maybe_location(db, appeal_id).await?;
     let now = Utc::now();
     let risk_case_id = Uuid::new_v4();
+    let standardization = appeal_standardization_service::latest_standardization(db, appeal_id).await?;
+    let mapping = standardization
+        .as_ref()
+        .map(|item| item.risk_case_mapping.clone())
+        .unwrap_or_else(|| serde_json::json!({}));
     let risk_level = input.risk_level.unwrap_or_else(|| {
-        if appeal.material_score >= 75 {
-            "medium".to_string()
-        } else {
-            "low".to_string()
-        }
+        mapping
+            .get("risk_level")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                if appeal.material_score >= 75 {
+                    "medium".to_string()
+                } else {
+                    "low".to_string()
+                }
+            })
     });
     let risk_tags = input
         .risk_tags
-        .unwrap_or_else(|| vec!["欠薪".to_string(), "农民工".to_string(), "工程建设".to_string()])
+        .unwrap_or_else(|| {
+            mapping
+                .get("risk_tags")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|items| !items.is_empty())
+                .unwrap_or_else(|| vec!["欠薪".to_string(), "农民工".to_string(), "工程建设".to_string()])
+        })
         .join(",");
     let area_name = location
         .as_ref()
         .map(|item| item.area_name.clone())
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+            mapping
+                .get("area_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| "北京市XX区".to_string());
-    let title = if appeal.project_name.trim().is_empty() {
-        format!("{}欠薪诉求", area_name)
-    } else {
-        format!("{}欠薪诉求", appeal.project_name)
-    };
-    let summary = format!(
-        "由移动端欠薪诉求 {} 转入。原始描述：{}",
-        appeal.appeal_code, appeal.oral_description
-    );
+    let title = mapping
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if appeal.project_name.trim().is_empty() {
+                format!("{}欠薪诉求", area_name)
+            } else {
+                format!("{}欠薪诉求", appeal.project_name)
+            }
+        });
+    let summary = mapping
+        .get("risk_reason_summary")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "由移动端欠薪诉求 {} 转入。原始描述：{}",
+                appeal.appeal_code, appeal.oral_description
+            )
+        });
+    let disposal_advice = mapping
+        .get("disposal_advice")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("建议核实用工主体、欠薪金额、同项目类似线索并依法处置。")
+        .to_string();
 
     let mut tx = db.begin().await.map_err(|_| AppError::Internal)?;
     sqlx::query(
@@ -75,7 +125,7 @@ pub async fn convert_to_risk_case(
             $1, NULL, $2, $3, 'mobile_labor_appeal', $4, $5,
             $6, 'pending_review', 'open', NULL, NULL, NULL,
             NULL, NULL, $7, $7,
-            $8, '建议核实用工主体、欠薪金额、同项目类似线索并依法处置。', 'pending', $9,
+            $8, $9, 'pending', $10,
             'pending', '', 'pending', ''
         )
         "#,
@@ -88,6 +138,7 @@ pub async fn convert_to_risk_case(
     .bind(appeal.material_score as f64)
     .bind(now)
     .bind(summary)
+    .bind(disposal_advice)
     .bind(risk_tags)
     .execute(&mut *tx)
     .await

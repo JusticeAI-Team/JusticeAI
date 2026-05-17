@@ -484,10 +484,54 @@ CREATE INDEX IF NOT EXISTS idx_appeal_risk_case_links_risk_case_id
 CREATE TABLE IF NOT EXISTS appeal_standardizations (
     id UUID PRIMARY KEY,
     appeal_id UUID NOT NULL REFERENCES labor_appeals(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending',
     provider_style TEXT NOT NULL DEFAULT 'openai_chat_completion_compatible',
     model_name TEXT NOT NULL DEFAULT '',
+    prompt_version TEXT NOT NULL DEFAULT '',
+    input_digest TEXT NOT NULL DEFAULT '',
+    input_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    standardized_title TEXT NOT NULL DEFAULT '',
     standard_summary TEXT NOT NULL DEFAULT '',
+    standardized_text TEXT NOT NULL DEFAULT '',
+    extracted_fields JSONB NOT NULL DEFAULT '{}'::jsonb,
+    missing_materials JSONB NOT NULL DEFAULT '[]'::jsonb,
+    conflict_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_assessment JSONB NOT NULL DEFAULT '{}'::jsonb,
+    risk_case_mapping JSONB NOT NULL DEFAULT '{}'::jsonb,
+    confidence DOUBLE PRECISION,
+    human_revision_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    reviewed_by TEXT NOT NULL DEFAULT '',
+    reviewed_at TIMESTAMPTZ,
+    error_message TEXT,
     extracted_json TEXT NOT NULL DEFAULT '{}',
     score_json TEXT NOT NULL DEFAULT '{}',
-    created_at TIMESTAMPTZ NOT NULL
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE appeal_standardizations
+    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending',
+    ADD COLUMN IF NOT EXISTS prompt_version TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS input_digest TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS input_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS standardized_title TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS standardized_text TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS extracted_fields JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS missing_materials JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS conflict_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS evidence_assessment JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS risk_case_mapping JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS human_revision_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS reviewed_by TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS error_message TEXT,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE INDEX IF NOT EXISTS idx_appeal_standardizations_appeal_id
+    ON appeal_standardizations (appeal_id);
+
+CREATE INDEX IF NOT EXISTS idx_appeal_standardizations_status
+    ON appeal_standardizations (status);
