@@ -95,6 +95,7 @@
             <button :class="{ active: activeTab === 'standard' }" @click="activeTab = 'standard'">智能标准化</button>
             <button :class="{ active: activeTab === 'raw' }" @click="activeTab = 'raw'">移动端原始信息</button>
             <button :class="{ active: activeTab === 'timeline' }" @click="activeTab = 'timeline'">时间线</button>
+            <button :class="{ active: activeTab === 'fusion' }" @click="activeTab = 'fusion'">融合研判</button>
           </nav>
 
           <section v-if="activeTab === 'summary'" class="doc-body">
@@ -204,7 +205,7 @@
             </article>
           </section>
 
-          <section v-else class="doc-body">
+          <section v-else-if="activeTab === 'timeline'" class="doc-body">
             <div v-for="event in detail.timeline" :key="event.id" class="mini-progress done">
               <span></span>
               <div>
@@ -212,6 +213,49 @@
                 <small>{{ event.content || event.event_type }} · {{ formatTime(event.created_at) }}</small>
               </div>
             </div>
+          </section>
+
+          <section v-else class="doc-body">
+            <article class="standard-section">
+              <header>
+                <strong>risk_cases 接入状态</strong>
+                <button @click="loadFusionData">刷新融合数据</button>
+              </header>
+              <div class="field-grid">
+                <div><span>关联案件</span><strong>{{ graphData?.case_code || similarData?.case_code || '待转入 risk_cases' }}</strong></div>
+                <div><span>图谱同步</span><strong>{{ graphData?.graph_sync_status || 'pending' }}</strong></div>
+                <div><span>向量索引</span><strong>{{ similarData?.vector_sync_status || 'pending' }}</strong></div>
+              </div>
+              <p>{{ graphData?.graph_sync_message || similarData?.vector_sync_message || '转入 risk_cases 后，系统会排队图谱、向量和类案发现任务。' }}</p>
+            </article>
+
+            <article class="standard-section">
+              <header>
+                <strong>图谱实体与关系</strong>
+                <span>{{ graphData?.nodes?.length || 0 }} / {{ graphData?.edges?.length || 0 }}</span>
+              </header>
+              <div class="fusion-list">
+                <div v-for="node in (graphData?.nodes || [])" :key="node.id" class="fusion-item">
+                  <strong>{{ node.label }}</strong>
+                  <span>{{ node.node_type }} · {{ Math.round((node.confidence || 0) * 100) }}%</span>
+                </div>
+                <p v-if="!graphData?.nodes?.length">暂无图谱实体，可先执行智能标准化或等待下游任务完成。</p>
+              </div>
+            </article>
+
+            <article class="standard-section">
+              <header>
+                <strong>类案发现</strong>
+                <span>{{ similarData?.items?.length || 0 }} 条</span>
+              </header>
+              <div class="fusion-list">
+                <div v-for="item in (similarData?.items || [])" :key="item.id" class="fusion-item">
+                  <strong>{{ item.case_code }} · {{ item.title }}</strong>
+                  <span>{{ item.area_name }} · {{ item.risk_level }} · 匹配 {{ Math.round((item.match_score || 0) * 100) }}%</span>
+                </div>
+                <p v-if="!similarData?.items?.length">暂未发现可展示的类案案件。</p>
+              </div>
+            </article>
           </section>
 
           <footer class="work-actions">
@@ -276,6 +320,8 @@ const statusFilter = ref('')
 const appeals = ref([])
 const detail = ref(null)
 const standardization = ref(null)
+const graphData = ref(null)
+const similarData = ref(null)
 const total = ref(0)
 const activeId = ref('')
 let mapIns = null
@@ -325,10 +371,28 @@ const openDetail = async (id) => {
   activeId.value = id
   detail.value = await apiGet(`/prosecutor/appeals/${id}`, { headers: STAFF_HEADERS })
   standardization.value = await apiGet(`/prosecutor/appeals/${id}/standardizations/latest`, { headers: STAFF_HEADERS })
+  await loadFusionData()
 }
 
 const loadDetail = async () => {
   if (activeId.value) await openDetail(activeId.value)
+}
+
+const loadFusionData = async () => {
+  graphData.value = null
+  similarData.value = null
+  if (!activeId.value || !detail.value?.risk_case_links?.length) return
+  try {
+    const [graph, similar] = await Promise.all([
+      apiGet(`/prosecutor/appeals/${activeId.value}/graph`, { headers: STAFF_HEADERS }),
+      apiGet(`/prosecutor/appeals/${activeId.value}/similar?limit=5`, { headers: STAFF_HEADERS })
+    ])
+    graphData.value = graph
+    similarData.value = similar
+  } catch (error) {
+    graphData.value = null
+    similarData.value = null
+  }
 }
 
 const setStatus = async (status) => {
@@ -388,6 +452,7 @@ const convertRiskCase = async () => {
     create_alert: true,
     create_dispatch_task: false
   }, { headers: STAFF_HEADERS })
+  activeTab.value = 'fusion'
   await afterAction()
 }
 
@@ -823,6 +888,25 @@ em {
 .conflict-list p {
   margin: 6px 0;
   color: #46556c;
+}
+
+.fusion-list {
+  display: grid;
+  gap: 8px;
+}
+
+.fusion-item {
+  display: grid;
+  gap: 4px;
+  background: #fff;
+  border: 1px solid #e4ecf7;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.fusion-item span {
+  color: #687793;
+  font-size: 12px;
 }
 
 .trace-grid {

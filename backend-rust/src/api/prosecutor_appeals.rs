@@ -31,6 +31,8 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/prosecutor/appeals", get(list_appeals))
         .route("/prosecutor/appeals/:id", get(appeal_detail))
+        .route("/prosecutor/appeals/:id/graph", get(appeal_graph))
+        .route("/prosecutor/appeals/:id/similar", get(appeal_similar))
         .route("/prosecutor/appeals/:id/accept", post(accept))
         .route(
             "/prosecutor/appeals/:id/request-materials",
@@ -58,6 +60,11 @@ struct AppealListQuery {
     submitted_to: Option<DateTime<Utc>>,
     page: Option<i64>,
     page_size: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SimilarQuery {
+    limit: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +121,67 @@ struct ProsecutorAppealDetail {
     timeline: Vec<AppealEventRow>,
     risk_case_links: Vec<AppealRiskCaseLinkRow>,
     available_actions: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct AppealGraphResponse {
+    appeal_id: Uuid,
+    risk_case_id: Uuid,
+    case_code: String,
+    graph_sync_status: String,
+    graph_sync_message: String,
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+struct GraphNode {
+    id: Uuid,
+    node_type: String,
+    label: String,
+    confidence: f64,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+struct GraphEdge {
+    id: Uuid,
+    relation_type: String,
+    source: Uuid,
+    target: Uuid,
+    confidence: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct AppealSimilarResponse {
+    appeal_id: Uuid,
+    risk_case_id: Uuid,
+    case_code: String,
+    vector_sync_status: String,
+    vector_sync_message: String,
+    items: Vec<SimilarRiskCaseItem>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+struct SimilarRiskCaseItem {
+    id: Uuid,
+    case_code: String,
+    title: String,
+    area_name: String,
+    risk_level: String,
+    risk_score: f64,
+    status: String,
+    match_score: f64,
+    matching_tags: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct LinkedRiskCase {
+    id: Uuid,
+    case_code: String,
+    graph_sync_status: String,
+    graph_sync_message: String,
+    vector_sync_status: String,
+    vector_sync_message: String,
 }
 
 async fn list_appeals(
@@ -191,6 +259,112 @@ async fn appeal_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
     Ok(ok(load_detail(state.db(), id).await?))
+}
+
+async fn appeal_graph(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<AppealGraphResponse>>, AppError> {
+    let linked = load_primary_risk_case(state.db(), id).await?;
+    let nodes = sqlx::query_as::<_, GraphNode>(
+        r#"
+        SELECT id, entity_type AS node_type, entity_name AS label, confidence
+        FROM knowledge_entities
+        WHERE case_id = $1
+        ORDER BY extracted_at DESC, id DESC
+        "#,
+    )
+    .bind(linked.id)
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    let edges = sqlx::query_as::<_, GraphEdge>(
+        r#"
+        SELECT gr.id, gr.relation_type, gr.source_entity_id AS source,
+               gr.target_entity_id AS target, gr.confidence
+        FROM graph_relations gr
+        WHERE EXISTS (
+            SELECT 1
+            FROM knowledge_entities ke
+            WHERE ke.case_id = $1
+              AND (ke.id = gr.source_entity_id OR ke.id = gr.target_entity_id)
+        )
+        ORDER BY gr.created_at DESC
+        "#,
+    )
+    .bind(linked.id)
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(ok(AppealGraphResponse {
+        appeal_id: id,
+        risk_case_id: linked.id,
+        case_code: linked.case_code,
+        graph_sync_status: linked.graph_sync_status,
+        graph_sync_message: linked.graph_sync_message,
+        nodes,
+        edges,
+    }))
+}
+
+async fn appeal_similar(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SimilarQuery>,
+) -> Result<Json<ApiResponse<AppealSimilarResponse>>, AppError> {
+    let linked = load_primary_risk_case(state.db(), id).await?;
+    let limit = query.limit.unwrap_or(5).clamp(1, 20);
+    let items = sqlx::query_as::<_, SimilarRiskCaseItem>(
+        r#"
+        WITH source_case AS (
+            SELECT id, case_code, area_name, risk_level, risk_tags
+            FROM risk_cases
+            WHERE id = $1
+        ),
+        source_tags AS (
+            SELECT DISTINCT trim(tag) AS tag
+            FROM source_case,
+                 regexp_split_to_table(COALESCE(source_case.risk_tags, ''), '[,，、\s]+') AS tag
+            WHERE trim(tag) <> ''
+        ),
+        candidates AS (
+            SELECT rc.id, rc.case_code, rc.title, rc.area_name, rc.risk_level,
+                   rc.risk_score, rc.status,
+                   COUNT(st.tag)::BIGINT AS matching_tags,
+                   CASE WHEN rc.area_name = sc.area_name THEN 0.20::DOUBLE PRECISION ELSE 0::DOUBLE PRECISION END AS area_score,
+                   CASE WHEN rc.risk_level = sc.risk_level THEN 0.10::DOUBLE PRECISION ELSE 0::DOUBLE PRECISION END AS level_score
+            FROM risk_cases rc
+            CROSS JOIN source_case sc
+            LEFT JOIN source_tags st ON rc.risk_tags ILIKE ('%' || st.tag || '%')
+            WHERE rc.id <> sc.id
+            GROUP BY rc.id, rc.case_code, rc.title, rc.area_name, rc.risk_level,
+                     rc.risk_score, rc.status, sc.area_name, sc.risk_level
+        )
+        SELECT id, case_code, title, area_name, risk_level, risk_score, status,
+               LEAST(0.99::DOUBLE PRECISION, 0.35::DOUBLE PRECISION + (matching_tags::DOUBLE PRECISION * 0.12::DOUBLE PRECISION) + area_score + level_score) AS match_score,
+               matching_tags
+        FROM candidates
+        WHERE matching_tags > 0 OR area_score > 0 OR level_score > 0
+        ORDER BY match_score DESC, risk_score DESC, case_code ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(linked.id)
+    .bind(limit)
+    .fetch_all(state.db())
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(ok(AppealSimilarResponse {
+        appeal_id: id,
+        risk_case_id: linked.id,
+        case_code: linked.case_code,
+        vector_sync_status: linked.vector_sync_status,
+        vector_sync_message: linked.vector_sync_message,
+        items,
+    }))
 }
 
 async fn accept(
@@ -476,6 +650,29 @@ async fn load_detail(db: &sqlx::PgPool, id: Uuid) -> Result<ProsecutorAppealDeta
         timeline: appeal_service::list_events(db, id, false).await?,
         risk_case_links: links,
     })
+}
+
+async fn load_primary_risk_case(
+    db: &sqlx::PgPool,
+    appeal_id: Uuid,
+) -> Result<LinkedRiskCase, AppError> {
+    sqlx::query_as::<_, LinkedRiskCase>(
+        r#"
+        SELECT rc.id, rc.case_code,
+               rc.graph_sync_status, rc.graph_sync_message,
+               rc.vector_sync_status, rc.vector_sync_message
+        FROM appeal_risk_case_links arcl
+        JOIN risk_cases rc ON rc.id = arcl.risk_case_id
+        WHERE arcl.appeal_id = $1
+        ORDER BY arcl.created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(appeal_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or_else(|| AppError::Validation("appeal has no linked risk_case yet".to_string()))
 }
 
 fn mask_list_row(row: AppealListRow) -> AppealListItem {
