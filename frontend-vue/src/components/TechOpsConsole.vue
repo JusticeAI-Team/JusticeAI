@@ -29,6 +29,24 @@
         <strong>{{ health?.data_overview?.risk_cases ?? '--' }}</strong>
       </div>
       <div class="overview-card">
+        <span>失败任务</span>
+        <strong :class="health?.ops_signals?.failed_platform_jobs ? 'bad-text' : 'ok-text'">
+          {{ health?.ops_signals?.failed_platform_jobs ?? '--' }}
+        </strong>
+      </div>
+      <div class="overview-card">
+        <span>标准化失败</span>
+        <strong :class="health?.ops_signals?.recent_ai_standardization_failures ? 'bad-text' : 'ok-text'">
+          {{ health?.ops_signals?.recent_ai_standardization_failures ?? '--' }}
+        </strong>
+      </div>
+      <div class="overview-card">
+        <span>材料上传失败</span>
+        <strong :class="health?.ops_signals?.recent_material_upload_failures ? 'bad-text' : 'ok-text'">
+          {{ health?.ops_signals?.recent_material_upload_failures ?? '--' }}
+        </strong>
+      </div>
+      <div class="overview-card">
         <span>最新检查</span>
         <strong>{{ shortTime(health?.timestamp) }}</strong>
       </div>
@@ -372,13 +390,15 @@ button { height: 36px; border-radius: 6px; padding: 0 14px; font-weight: 900; cu
 button:disabled { opacity: 0.65; cursor: not-allowed; }
 .primary-btn { border: 1px solid #122E8A; background: #122E8A; color: #FFFFFF; }
 .ghost-btn { border: 1px solid rgba(18, 46, 138, 0.22); background: #FFFFFF; color: #122E8A; }
-.overview-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.overview-strip { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .overview-card { background: #FFFFFF; border: 1px solid rgba(18, 46, 138, 0.12); border-radius: 8px; padding: 14px; box-shadow: 0 4px 12px rgba(18, 46, 138, 0.04); }
 .overview-card span { color: #666; font-size: 12px; font-weight: bold; }
 .overview-card strong { display: block; margin-top: 7px; color: #122E8A; font-size: 22px; font-family: 'JetBrains Mono', Consolas, monospace; }
 .overview-card strong.ok { color: #0F7E3B; }
 .overview-card strong.warn { color: #B56B00; }
 .overview-card strong.bad { color: #D9363E; }
+.overview-card strong.ok-text { color: #0F7E3B; }
+.overview-card strong.bad-text { color: #D9363E; }
 .error-box { margin-bottom: 14px; padding: 10px 14px; background: rgba(217, 54, 62, 0.08); border: 1px solid rgba(217, 54, 62, 0.2); color: #D9363E; border-radius: 6px; font-weight: bold; font-size: 12px; }
 .ops-grid { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 16px; }
 .panel { background: #FFFFFF; border: 1px solid rgba(18, 46, 138, 0.14); border-radius: 8px; padding: 18px; box-shadow: 0 6px 18px rgba(18, 46, 138, 0.05); }

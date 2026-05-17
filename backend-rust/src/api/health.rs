@@ -21,6 +21,7 @@ struct HealthResponse {
     dependency_details: Vec<DependencyDetail>,
     storage: Vec<StorageStatus>,
     data_overview: DataOverview,
+    ops_signals: OpsSignals,
     notes: Vec<String>,
 }
 
@@ -57,6 +58,13 @@ struct DataOverview {
     risk_cases: i64,
     alerts: i64,
     reports: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct OpsSignals {
+    failed_platform_jobs: i64,
+    recent_ai_standardization_failures: i64,
+    recent_material_upload_failures: i64,
 }
 
 async fn health(State(state): State<AppState>) -> axum::Json<ApiResponse<HealthResponse>> {
@@ -114,6 +122,23 @@ async fn health(State(state): State<AppState>) -> axum::Json<ApiResponse<HealthR
         risk_cases: scalar_count(state.db(), "SELECT COUNT(*) FROM risk_cases").await,
         alerts: scalar_count(state.db(), "SELECT COUNT(*) FROM alerts").await,
         reports: scalar_count(state.db(), "SELECT COUNT(*) FROM generated_reports").await,
+    };
+    let ops_signals = OpsSignals {
+        failed_platform_jobs: scalar_count(
+            state.db(),
+            "SELECT COUNT(*) FROM platform_jobs WHERE status = 'failed'",
+        )
+        .await,
+        recent_ai_standardization_failures: scalar_count(
+            state.db(),
+            "SELECT COUNT(*) FROM appeal_standardizations WHERE status = 'failed' OR error_message IS NOT NULL",
+        )
+        .await,
+        recent_material_upload_failures: scalar_count(
+            state.db(),
+            "SELECT COUNT(*) FROM platform_jobs WHERE job_type = 'appeal_material_upload' AND status = 'failed'",
+        )
+        .await,
     };
 
     ok(HealthResponse {
@@ -176,6 +201,7 @@ async fn health(State(state): State<AppState>) -> axum::Json<ApiResponse<HealthR
             storage_status("training_dir", &state.settings().storage.training_dir),
         ],
         data_overview,
+        ops_signals,
         notes: vec![
             "Health is intentionally structured for the platform readiness screen.".to_string(),
             "Milvus and Embedding are actively probed so the ops console can show real vector-chain readiness.".to_string(),
