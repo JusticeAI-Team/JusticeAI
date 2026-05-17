@@ -328,3 +328,166 @@ UPDATE platform_jobs SET
     message = COALESCE(message, ''),
     request_json = COALESCE(request_json, '{}'),
     result_json = COALESCE(result_json, '{}');
+
+CREATE TABLE IF NOT EXISTS mobile_applicants (
+    id UUID PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    real_name TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    id_card_no TEXT,
+    address_text TEXT,
+    worker_type TEXT NOT NULL DEFAULT 'construction_worker',
+    auth_status TEXT NOT NULL DEFAULT 'dev_verified',
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mobile_applicants_phone
+    ON mobile_applicants (phone);
+
+CREATE TABLE IF NOT EXISTS labor_appeals (
+    id UUID PRIMARY KEY,
+    applicant_id UUID NOT NULL REFERENCES mobile_applicants(id),
+    appeal_code TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    risk_case_status TEXT NOT NULL DEFAULT 'not_converted',
+    oral_description TEXT NOT NULL DEFAULT '',
+    wage_amount_text TEXT NOT NULL DEFAULT '',
+    employer_name TEXT NOT NULL DEFAULT '',
+    contractor_name TEXT NOT NULL DEFAULT '',
+    project_name TEXT NOT NULL DEFAULT '',
+    work_period_text TEXT NOT NULL DEFAULT '',
+    coworker_count INTEGER,
+    demand_text TEXT NOT NULL DEFAULT '',
+    worker_name TEXT NOT NULL DEFAULT '',
+    worker_phone TEXT NOT NULL DEFAULT '',
+    material_score INTEGER NOT NULL DEFAULT 0,
+    missing_materials TEXT NOT NULL DEFAULT '',
+    submitted_at TIMESTAMPTZ,
+    accepted_at TIMESTAMPTZ,
+    resolved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_labor_appeals_applicant_id
+    ON labor_appeals (applicant_id);
+
+CREATE INDEX IF NOT EXISTS idx_labor_appeals_status
+    ON labor_appeals (status);
+
+CREATE INDEX IF NOT EXISTS idx_labor_appeals_created_at
+    ON labor_appeals (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS appeal_materials (
+    id UUID PRIMARY KEY,
+    appeal_id UUID NOT NULL REFERENCES labor_appeals(id) ON DELETE CASCADE,
+    category TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    original_filename TEXT NOT NULL,
+    stored_filename TEXT NOT NULL,
+    stored_path TEXT NOT NULL,
+    file_size BIGINT NOT NULL,
+    mime_type TEXT,
+    deleted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_appeal_materials_appeal_id
+    ON appeal_materials (appeal_id);
+
+CREATE INDEX IF NOT EXISTS idx_appeal_materials_category
+    ON appeal_materials (category);
+
+CREATE TABLE IF NOT EXISTS appeal_locations (
+    id UUID PRIMARY KEY,
+    appeal_id UUID NOT NULL REFERENCES labor_appeals(id) ON DELETE CASCADE,
+    latitude DOUBLE PRECISION NOT NULL,
+    longitude DOUBLE PRECISION NOT NULL,
+    address_text TEXT NOT NULL DEFAULT '',
+    area_code TEXT NOT NULL DEFAULT '',
+    area_name TEXT NOT NULL DEFAULT '',
+    confirmed_by_applicant BOOLEAN NOT NULL DEFAULT FALSE,
+    geo_source TEXT NOT NULL DEFAULT 'applicant_map',
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_appeal_locations_appeal_id
+    ON appeal_locations (appeal_id);
+
+CREATE TABLE IF NOT EXISTS appeal_events (
+    id UUID PRIMARY KEY,
+    appeal_id UUID NOT NULL REFERENCES labor_appeals(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    actor_type TEXT NOT NULL,
+    actor_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    visible_to_applicant BOOLEAN NOT NULL DEFAULT TRUE,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_appeal_events_appeal_id_created_at
+    ON appeal_events (appeal_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS appeal_notifications (
+    id UUID PRIMARY KEY,
+    appeal_id UUID NOT NULL REFERENCES labor_appeals(id) ON DELETE CASCADE,
+    applicant_id UUID NOT NULL REFERENCES mobile_applicants(id),
+    notification_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    read_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_appeal_notifications_applicant_id_created_at
+    ON appeal_notifications (applicant_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS appeal_review_actions (
+    id UUID PRIMARY KEY,
+    appeal_id UUID NOT NULL REFERENCES labor_appeals(id) ON DELETE CASCADE,
+    staff_id TEXT NOT NULL,
+    staff_role TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    from_status TEXT NOT NULL,
+    to_status TEXT NOT NULL,
+    request_materials TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    internal_note TEXT NOT NULL DEFAULT '',
+    deadline DATE,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_appeal_review_actions_appeal_id_created_at
+    ON appeal_review_actions (appeal_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS appeal_risk_case_links (
+    id UUID PRIMARY KEY,
+    appeal_id UUID NOT NULL REFERENCES labor_appeals(id) ON DELETE CASCADE,
+    risk_case_id UUID NOT NULL REFERENCES risk_cases(id) ON DELETE CASCADE,
+    link_type TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (appeal_id, risk_case_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_appeal_risk_case_links_appeal_id
+    ON appeal_risk_case_links (appeal_id);
+
+CREATE INDEX IF NOT EXISTS idx_appeal_risk_case_links_risk_case_id
+    ON appeal_risk_case_links (risk_case_id);
+
+CREATE TABLE IF NOT EXISTS appeal_standardizations (
+    id UUID PRIMARY KEY,
+    appeal_id UUID NOT NULL REFERENCES labor_appeals(id) ON DELETE CASCADE,
+    provider_style TEXT NOT NULL DEFAULT 'openai_chat_completion_compatible',
+    model_name TEXT NOT NULL DEFAULT '',
+    standard_summary TEXT NOT NULL DEFAULT '',
+    extracted_json TEXT NOT NULL DEFAULT '{}',
+    score_json TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL
+);

@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod bootstrap;
 mod config_loader;
+mod domain;
 mod services;
 mod shared;
 

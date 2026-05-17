@@ -21,12 +21,33 @@ async function request(path, options = {}) {
   return payload?.data ?? payload
 }
 
-export const apiGet = (path) => request(path)
+export const apiGet = (path, options = {}) => request(path, options)
 
-export const apiPost = (path, body = {}) =>
+export const apiPost = (path, body = {}, options = {}) =>
   request(path, {
+    ...options,
     method: 'POST',
     body: JSON.stringify(body)
+  })
+
+export const apiPut = (path, body = {}, options = {}) =>
+  request(path, {
+    ...options,
+    method: 'PUT',
+    body: JSON.stringify(body)
+  })
+
+export const apiDelete = (path, options = {}) =>
+  request(path, {
+    ...options,
+    method: 'DELETE'
+  })
+
+export const apiUpload = (path, formData, options = {}) =>
+  request(path, {
+    ...options,
+    method: 'POST',
+    body: formData
   })
 
 export const apiDownloadUrl = (path) => buildUrl(path)

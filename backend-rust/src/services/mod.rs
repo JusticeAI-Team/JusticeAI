@@ -1,4 +1,8 @@
 pub mod ai;
+pub mod appeal_conversion_service;
+pub mod appeal_material_service;
+pub mod appeal_notification_service;
+pub mod appeal_service;
 pub mod embedding;
 pub mod graph;
 pub mod pipeline;
