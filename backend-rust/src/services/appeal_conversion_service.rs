@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -138,13 +140,13 @@ pub async fn convert_to_risk_case(
     .bind(risk_case_id)
     .bind(format!("APPEAL-{}", appeal.appeal_code))
     .bind(&title)
-    .bind(area_name)
-    .bind(risk_level)
+    .bind(&area_name)
+    .bind(&risk_level)
     .bind(appeal.material_score as f64)
     .bind(now)
-    .bind(summary)
-    .bind(disposal_advice)
-    .bind(risk_tags)
+    .bind(&summary)
+    .bind(&disposal_advice)
+    .bind(&risk_tags)
     .execute(&mut *tx)
     .await
     .map_err(|_| AppError::Internal)?;
@@ -185,6 +187,20 @@ pub async fn convert_to_risk_case(
         "转为风险案件",
         "线索已纳入现有风险案件研判链路",
         true,
+    )
+    .await?;
+
+    create_initial_case_graph_tx(
+        &mut tx,
+        risk_case_id,
+        &title,
+        &appeal.worker_name,
+        &appeal.project_name,
+        &appeal.employer_name,
+        &appeal.contractor_name,
+        &area_name,
+        &risk_tags,
+        now,
     )
     .await?;
 
@@ -301,6 +317,140 @@ pub async fn link_existing_risk_case(
     .await?;
     tx.commit().await.map_err(|_| AppError::Internal)?;
     load_link(db, appeal_id, input.risk_case_id).await
+}
+
+async fn create_initial_case_graph_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    risk_case_id: Uuid,
+    title: &str,
+    worker_name: &str,
+    project_name: &str,
+    employer_name: &str,
+    contractor_name: &str,
+    area_name: &str,
+    risk_tags: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), AppError> {
+    let mut entity_specs = vec![
+        ("case", title, 0.95),
+        ("person", worker_name, 0.9),
+        ("project", project_name, 0.86),
+        ("organization", employer_name, 0.82),
+        ("person", contractor_name, 0.78),
+        ("location", area_name, 0.9),
+    ];
+    for tag in risk_tags
+        .split([',', '，', '、'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        entity_specs.push(("risk_tag", tag, 0.72));
+    }
+
+    let mut ids = HashMap::new();
+    for (entity_type, entity_name, confidence) in entity_specs {
+        let normalized = entity_name.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        let key = format!("{entity_type}:{normalized}");
+        if ids.contains_key(&key) {
+            continue;
+        }
+        let entity_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO knowledge_entities (
+                id, case_id, entity_type, entity_name, confidence, extracted_at, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $6)
+            "#,
+        )
+        .bind(entity_id)
+        .bind(risk_case_id)
+        .bind(entity_type)
+        .bind(normalized)
+        .bind(confidence)
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| AppError::Internal)?;
+        ids.insert(key, entity_id);
+    }
+
+    let case_id = entity_id(&ids, "case", title);
+    let worker_id = entity_id(&ids, "person", worker_name);
+    let project_id = entity_id(&ids, "project", project_name);
+    let employer_id = entity_id(&ids, "organization", employer_name);
+    let contractor_id = entity_id(&ids, "person", contractor_name);
+    let area_id = entity_id(&ids, "location", area_name);
+
+    insert_relation_if_present(tx, case_id, worker_id, "appeal_worker", 0.9, now).await?;
+    insert_relation_if_present(tx, case_id, project_id, "appeal_project", 0.88, now).await?;
+    insert_relation_if_present(tx, case_id, employer_id, "appeal_employer", 0.82, now).await?;
+    insert_relation_if_present(tx, case_id, contractor_id, "appeal_contractor", 0.78, now).await?;
+    insert_relation_if_present(tx, case_id, area_id, "appeal_area", 0.9, now).await?;
+    insert_relation_if_present(tx, worker_id, project_id, "worked_at", 0.86, now).await?;
+    insert_relation_if_present(tx, employer_id, project_id, "employing_entity", 0.8, now).await?;
+    insert_relation_if_present(tx, contractor_id, project_id, "project_manager", 0.76, now).await?;
+    insert_relation_if_present(tx, project_id, area_id, "located_in", 0.86, now).await?;
+
+    sqlx::query(
+        r#"
+        UPDATE risk_cases
+        SET graph_sync_status = 'synced',
+            graph_sync_message = $2,
+            graph_synced_at = $3,
+            updated_at = $3
+        WHERE id = $1
+        "#,
+    )
+    .bind(risk_case_id)
+    .bind("generated initial graph from labor appeal fields")
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
+
+    Ok(())
+}
+
+fn entity_id(ids: &HashMap<String, Uuid>, entity_type: &str, entity_name: &str) -> Option<Uuid> {
+    ids.get(&format!("{entity_type}:{}", entity_name.trim())).copied()
+}
+
+async fn insert_relation_if_present(
+    tx: &mut Transaction<'_, Postgres>,
+    source: Option<Uuid>,
+    target: Option<Uuid>,
+    relation_type: &str,
+    confidence: f64,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), AppError> {
+    let (Some(source), Some(target)) = (source, target) else {
+        return Ok(());
+    };
+    if source == target {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO graph_relations (
+            id, relation_type, source_entity_id, target_entity_id, confidence, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(relation_type)
+    .bind(source)
+    .bind(target)
+    .bind(confidence)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| AppError::Internal)?;
+    Ok(())
 }
 
 async fn create_downstream_jobs_tx(
