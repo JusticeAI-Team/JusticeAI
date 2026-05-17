@@ -186,8 +186,10 @@ struct LinkedRiskCase {
 
 async fn list_appeals(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<AppealListQuery>,
 ) -> Result<Json<ApiResponse<PageResponse<AppealListItem>>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     let page = query.page.unwrap_or(1).max(1);
     let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
     let offset = (page - 1) * page_size;
@@ -256,15 +258,19 @@ async fn list_appeals(
 
 async fn appeal_detail(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     Ok(ok(load_detail(state.db(), id).await?))
 }
 
 async fn appeal_graph(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<AppealGraphResponse>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     let linked = load_primary_risk_case(state.db(), id).await?;
     let nodes = sqlx::query_as::<_, GraphNode>(
         r#"
@@ -311,9 +317,11 @@ async fn appeal_graph(
 
 async fn appeal_similar(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Query(query): Query<SimilarQuery>,
 ) -> Result<Json<ApiResponse<AppealSimilarResponse>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     let linked = load_primary_risk_case(state.db(), id).await?;
     let limit = query.limit.unwrap_or(5).clamp(1, 20);
     let items = sqlx::query_as::<_, SimilarRiskCaseItem>(
@@ -372,6 +380,7 @@ async fn accept(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     let staff_id = staff_id(&headers);
     let staff_role = staff_role(&headers);
     let appeal = appeal_service::get_appeal(state.db(), id).await?;
@@ -430,6 +439,7 @@ async fn request_materials(
     Path(id): Path<Uuid>,
     Json(input): Json<RequestMaterialsInput>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     let staff_id = staff_id(&headers);
     let staff_role = staff_role(&headers);
     let appeal = appeal_service::get_appeal(state.db(), id).await?;
@@ -486,6 +496,7 @@ async fn status_action(
     Path(id): Path<Uuid>,
     Json(input): Json<StatusActionInput>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     let staff_id = staff_id(&headers);
     let staff_role = staff_role(&headers);
     let appeal = appeal_service::get_appeal(state.db(), id).await?;
@@ -545,6 +556,7 @@ async fn convert_risk_case(
     Path(id): Path<Uuid>,
     Json(input): Json<ConvertRiskCaseInput>,
 ) -> Result<Json<ApiResponse<ConversionResult>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     let staff_id = staff_id(&headers);
     Ok(ok(
         appeal_conversion_service::convert_to_risk_case(state.db(), id, &staff_id, input).await?,
@@ -557,6 +569,7 @@ async fn link_risk_case(
     Path(id): Path<Uuid>,
     Json(input): Json<LinkRiskCaseInput>,
 ) -> Result<Json<ApiResponse<AppealRiskCaseLinkRow>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     let staff_id = staff_id(&headers);
     Ok(ok(
         appeal_conversion_service::link_existing_risk_case(state.db(), id, &staff_id, input).await?,
@@ -569,6 +582,7 @@ async fn resolve(
     Path(id): Path<Uuid>,
     Json(input): Json<ResolveInput>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     let staff_id = staff_id(&headers);
     let staff_role = staff_role(&headers);
     let appeal = appeal_service::get_appeal(state.db(), id).await?;
@@ -628,6 +642,7 @@ async fn confirm_location(
     Path(id): Path<Uuid>,
     Json(input): Json<StaffConfirmLocationInput>,
 ) -> Result<Json<ApiResponse<ProsecutorAppealDetail>>, AppError> {
+    ensure_staff_allowed(&headers)?;
     let staff_id = staff_id(&headers);
     appeal_service::confirm_location_by_staff(state.db(), id, &staff_id, input).await?;
     Ok(ok(load_detail(state.db(), id).await?))
@@ -732,4 +747,16 @@ fn staff_role(headers: &HeaderMap) -> String {
         .and_then(|value| value.to_str().ok())
         .unwrap_or("prosecutor")
         .to_string()
+}
+
+fn ensure_staff_allowed(headers: &HeaderMap) -> Result<(), AppError> {
+    let role = staff_role(headers);
+    if matches!(
+        role.as_str(),
+        "prosecutor" | "prosecutor_reviewer" | "prosecutor_admin"
+    ) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
 }

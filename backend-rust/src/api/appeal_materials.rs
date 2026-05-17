@@ -92,6 +92,7 @@ async fn download_prosecutor_material(
     headers: HeaderMap,
     Path((id, material_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, AppError> {
+    ensure_staff_allowed(&headers)?;
     let staff_id = staff_id(&headers);
     let material = appeal_material_service::download_material_for_staff(
         state.db(),
@@ -121,6 +122,26 @@ fn staff_id(headers: &HeaderMap) -> String {
         .and_then(|value| value.to_str().ok())
         .unwrap_or("dev-staff")
         .to_string()
+}
+
+fn staff_role(headers: &HeaderMap) -> String {
+    headers
+        .get("x-staff-role")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("prosecutor")
+        .to_string()
+}
+
+fn ensure_staff_allowed(headers: &HeaderMap) -> Result<(), AppError> {
+    let role = staff_role(headers);
+    if matches!(
+        role.as_str(),
+        "prosecutor" | "prosecutor_reviewer" | "prosecutor_admin"
+    ) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
 }
 
 fn material_download_response(
